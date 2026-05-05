@@ -1,0 +1,24 @@
+project: MolSynthRL
+experiment_name: GreedySearch_Uni
+reaction_mode: uni
+masking: reaction_valid
+reward: delta_qed
+dataset:
+  training_file: GenMolRL/data/Uni/reactants_full.pkl
+  validation_file: GenMolRL/data/Uni/reactants_full.pkl
+  templates_file: GenMolRL/data/Uni/templates_unimolecolar_explicit.pkl
+env:
+  max_steps: 5
+  invalid_reaction_penalty: -1.0
+  reward_round_digits: 3
+training:
+  seed: 42
+search:
+  max_steps: 5
+  max_paths: 100
+  max_attempts: 1000
+  max_reactions: 10000
+  max_r2_per_template: 100
+  results_file: GenMolRL/runs/greedy_search_uni_results.txt
+  overwrite_results: true
+  use_wandb: true

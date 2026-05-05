@@ -7,6 +7,8 @@ The first goal is behavior-compatible migration of:
 - `exp_branch_run_PPO_mask_extendedObs.sh`
 - `exp_branch_run_A2C_mask.sh`
 - `run_td3.sh`
+- `run_random_search.sh`
+- legacy greedy search scripts under `designing-new-molecules/src/training/`
 
 The second goal is to provide a structured place for future methods such as SynFlowNet and REINVENT scaffold decorator.
 
@@ -18,6 +20,7 @@ GenMolRL/
     chem/          # RDKit reactions, fingerprints, product selection, dataset staging
     envs/          # unified molecule-design Gymnasium env, masks, rewards, starts
     algorithms/    # PPO, A2C, TD3/PGFS trainers
+                   # plus random and greedy search baselines
     logging/       # W&B metrics and callbacks
     methods/       # future SynFlowNet / scaffold-decorator adapters
     scripts/       # unified CLI entry points
@@ -141,6 +144,8 @@ Use the wrapper scripts from the repository root:
 ./run_genmolrl_ppo.sh
 ./run_genmolrl_a2c.sh
 ./run_genmolrl_td3.sh
+./run_genmolrl_random_search.sh
+./run_genmolrl_greedy_search.sh
 ```
 
 Or call the unified launcher directly:
@@ -161,8 +166,61 @@ EXPERIMENT_NAME=PPO_Uni_test ./run_genmolrl_ppo.sh
 MASKING=none ./run_genmolrl_ppo.sh
 REWARD=final_qed ./run_genmolrl_a2c.sh
 REACTION_MODE=bi ./run_genmolrl_td3.sh
+WANDB_MODE=disabled ./run_genmolrl_random_search.sh
 WANDB_MODE=disabled ./run_genmolrl_ppo.sh
 ```
+
+## Supported Algorithms
+
+### PPO
+
+`ppo` trains a policy with Stable-Baselines3 / sb3-contrib. Masked mode uses `MaskablePPO`; no-mask mode uses plain SB3 PPO.
+
+### A2C
+
+`a2c` trains an actor-critic policy. Masked mode uses a custom policy that reads the action mask from the observation tail; no-mask mode uses plain `MlpPolicy`.
+
+### TD3/PGFS
+
+`td3` trains the custom PGFS-style TD3 implementation. It learns a template selector plus a continuous R2 vector for bimolecular reactions.
+
+### Random Search
+
+`random_search` is a non-neural baseline. At each step:
+
+1. Select a random starting molecule from the configured reactant pool.
+2. Build the valid template list using the configured masking mode.
+3. Randomly choose one valid template.
+4. If the template is bimolecular, randomly choose one valid R2 from the reactant pool.
+5. Apply the reaction and continue from the product if valid.
+
+It writes a `.txt` report containing a summary section plus successful synthesis steps, and logs simple W&B metrics such as saved paths, total reactions, last terminal QED, and best QED.
+
+The text report includes a `START` row for each saved path (`step=0`) followed by one row per successful reaction. By default, search result files are overwritten at the start of a run (`overwrite_results: true`) so repeated launches do not mix path IDs from old runs.
+
+### Greedy Search
+
+`greedy_search` is a non-neural baseline. At each step:
+
+1. Build the valid template list using the configured masking mode.
+2. Enumerate candidate products from valid templates.
+3. For bimolecular templates, enumerate up to `max_r2_per_template` valid second reactants.
+4. Score candidates with the configured reward mode.
+5. Choose the candidate with the best score and continue from that product.
+
+For `reward: delta_qed`, greedy search maximizes QED improvement at each step. For `reward: final_qed`, it maximizes product QED.
+
+Search stopping controls:
+
+```yaml
+search:
+  max_steps: 5        # max reaction depth per path
+  max_paths: 100      # max saved successful paths
+  max_attempts: 1000  # max attempted starts
+  max_reactions: 10000
+```
+
+These search settings are local to random/greedy search and do not affect PPO, A2C, or TD3 configs.
 
 ## Reaction Modes
 

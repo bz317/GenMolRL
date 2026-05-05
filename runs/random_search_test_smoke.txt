@@ -1,0 +1,14 @@
+# GenMolRL search results
+
+[summary]
+attempts: 1
+saved_paths: 1
+total_reactions: 2
+best_qed: 0.7965442293326961
+results_file: /home/bz317/new_mol_with_RL_GNN/GenMolRL/runs/random_search_test_smoke.txt
+
+[steps]
+path_id	step	reactant	template	product	qed	reward	second_reactant
+0	0	NCC1CCCC1N1CCCS1(=O)=O	START	NCC1CCCC1N1CCCS1(=O)=O	0.717	0.0	
+0	1	NCC1CCCC1N1CCCS1(=O)=O	FGI_nitrilation	N#CC1CCCC1N1CCCS1(=O)=O	0.646	-0.072	
+0	2	N#CC1CCCC1N1CCCS1(=O)=O	Tetrazol_formation	O=S1(=O)CCCN1C1CCCC1c1nn[nH]n1	0.797	0.151	
