@@ -1,0 +1,40 @@
+project: MolSynthRL
+experiment_name: PPO_Uni
+reaction_mode: uni
+masking: reaction_valid
+reward: delta_qed
+dataset:
+  training_file: GenMolRL/data/Uni/reactants_full.pkl
+  validation_file: GenMolRL/data/Uni/reactants_full.pkl
+  templates_file: GenMolRL/data/Uni/templates_unimolecolar_explicit.pkl
+  start_strategy: random_pool
+  start_smiles_file_eval: GenMolRL/data/Uni/eval_start_smiles.txt
+env:
+  algorithm_family: sb3_discrete
+  action_design: discrete
+  max_steps: 5
+  use_stop_action: true
+  stop_early_penalty: 0.0
+  stop_penalty_until_step: 3
+  invalid_reaction_penalty: -1.0
+  reward_round_digits: 3
+  info_qed_round_digits: 3
+training:
+  seed: 42
+  total_timesteps: 1000000
+  n_envs: 1
+ppo:
+  learning_rate: 0.0003
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  progress_bar: false
+callbacks:
+  model_save_freq: 5000
+  gradient_save_freq: 100
