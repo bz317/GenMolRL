@@ -115,7 +115,7 @@ This creates the canonical Uni directory:
 
 ```text
 GenMolRL/data/Uni/reactants_train.pkl
-GenMolRL/data/Uni/reactants_val.pkl
+GenMolRL/data/Uni/reactants_test.pkl
 GenMolRL/data/Uni/templates_unimolecolar_explicit.pkl
 ```
 
@@ -126,7 +126,7 @@ GenMolRL/data/Uni/reactants_full.pkl
 GenMolRL/data/Uni/eval_start_smiles.txt
 ```
 
-`reactants_full.pkl` is the merged train+val reactant pool used by the compatibility PPO/A2C/TD3 configs. `eval_start_smiles.txt` contains the validation SMILES and is used for deterministic evaluation starts.
+`reactants_train.pkl` is used for training, `reactants_test.pkl` is used for testing/search, and `eval_start_smiles.txt` contains the test SMILES for deterministic evaluation starts. `reactants_full.pkl` is still staged as a convenience merged pool, but it is not used by the current default configs.
 
 The future Bi dataset should live under:
 
@@ -169,6 +169,17 @@ REACTION_MODE=bi ./run_genmolrl_td3.sh
 WANDB_MODE=disabled ./run_genmolrl_random_search.sh
 WANDB_MODE=disabled ./run_genmolrl_ppo.sh
 ```
+
+Random and greedy search runners also accept dataset path overrides:
+
+```bash
+TRAIN_FILE=GenMolRL/data/Uni/reactants_train.pkl \
+TEST_FILE=GenMolRL/data/Uni/reactants_test.pkl \
+TEMPLATE_FILE=GenMolRL/data/Uni/templates_unimolecolar_explicit.pkl \
+./run_genmolrl_random_search.sh
+```
+
+`TRAINING_FILE` and `TEMPLATES_FILE` are also accepted. Set `STAGE_DATA=false` if you do not want the runner to refresh `GenMolRL/data/Uni` before launching.
 
 ## Supported Algorithms
 
@@ -411,7 +422,7 @@ This matches current PPO/A2C/TD3 training behavior.
 
 Episodes cycle through a SMILES file deterministically.
 
-This matches current evaluation behavior, where `eval_start_smiles.txt` contains validation molecules and evaluation cycles through them.
+This matches current evaluation behavior, where `eval_start_smiles.txt` contains test molecules and evaluation cycles through them.
 
 ### `fixed`
 

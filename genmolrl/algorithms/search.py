@@ -64,7 +64,8 @@ class SearchRunner:
         random.seed(self.seed)
         np.random.seed(self.seed)
 
-        reactants = load_pickle(repo_root() / self.dataset["training_file"])
+        reactant_pool_file = self.dataset.get("test_file", self.dataset["training_file"])
+        reactants = load_pickle(repo_root() / reactant_pool_file)
         templates = load_pickle(repo_root() / self.dataset["templates_file"])
         all_manager = ReactionManager(templates, reactants)
         templates_for_mode = all_manager.templates_for_mode(config["reaction_mode"])

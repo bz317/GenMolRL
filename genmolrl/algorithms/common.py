@@ -54,9 +54,11 @@ def init_wandb(config: dict, algorithm: str, experiment_name: str):
 def env_kwargs(config: dict, *, eval_env: bool = False) -> dict:
     dataset = config["dataset"]
     env_cfg = config["env"]
-    key = "validation_file" if eval_env else "training_file"
+    reactant_file = dataset["training_file"] if not eval_env else dataset.get("test_file")
+    if reactant_file is None:
+        raise KeyError("dataset.test_file must be set for evaluation environments")
     kwargs = {
-        "reactant_file": dataset[key],
+        "reactant_file": reactant_file,
         "template_file": dataset["templates_file"],
         "reaction_mode": config["reaction_mode"],
         "algorithm_family": env_cfg["algorithm_family"],

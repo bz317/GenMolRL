@@ -33,6 +33,9 @@ def main() -> None:
     parser.add_argument("--reward", choices=["delta_qed", "final_qed"])
     parser.add_argument("--config", required=True)
     parser.add_argument("--experiment-name")
+    parser.add_argument("--training-file", help="Override dataset.training_file from the config")
+    parser.add_argument("--test-file", help="Override dataset.test_file from the config")
+    parser.add_argument("--templates-file", help="Override dataset.templates_file from the config")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -43,6 +46,16 @@ def main() -> None:
         config["masking"] = args.masking
     if args.reward:
         config["reward"] = args.reward
+    dataset_overrides = {
+        "training_file": args.training_file,
+        "test_file": args.test_file,
+        "templates_file": args.templates_file,
+    }
+    if any(value is not None for value in dataset_overrides.values()):
+        config.setdefault("dataset", {})
+        for key, value in dataset_overrides.items():
+            if value is not None:
+                config["dataset"][key] = value
 
     experiment_name = args.experiment_name or config.get(
         "experiment_name",

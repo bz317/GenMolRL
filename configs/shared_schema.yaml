@@ -6,7 +6,7 @@ masking: substructure # substructure | reaction_valid | r2_available | none
 reward: delta_qed # delta_qed | final_qed
 dataset:
   training_file: path
-  validation_file: path
+  test_file: path
   templates_file: path
   start_strategy: random_pool # random_pool | cycle_file | fixed | learned_policy
   start_smiles_file: null

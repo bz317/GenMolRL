@@ -4,8 +4,8 @@ reaction_mode: uni
 masking: reaction_valid
 reward: delta_qed
 dataset:
-  training_file: GenMolRL/data/Uni/reactants_full.pkl
-  validation_file: GenMolRL/data/Uni/reactants_full.pkl
+  training_file: GenMolRL/data/Uni/reactants_train.pkl
+  test_file: GenMolRL/data/Uni/reactants_test.pkl
   templates_file: GenMolRL/data/Uni/templates_unimolecolar_explicit.pkl
 env:
   max_steps: 5
