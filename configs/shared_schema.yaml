@@ -1,5 +1,5 @@
 # Informal config schema for GenMolRL experiments.
-project: MolSynthRL
+project: GenMolRL
 experiment_name: string
 reaction_mode: uni # uni | bi
 masking: substructure # substructure | reaction_valid | r2_available | none

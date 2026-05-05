@@ -1,4 +1,4 @@
-project: MolSynthRL
+project: GenMolRL
 experiment_name: A2C_Uni
 reaction_mode: uni
 masking: reaction_valid

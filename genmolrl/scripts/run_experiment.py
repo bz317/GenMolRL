@@ -43,7 +43,7 @@ def main() -> None:
         "experiment_name",
         f"{args.algorithm.upper()}_{config['reaction_mode']}_{config['reward']}",
     )
-    os.environ.setdefault("WANDB_PROJECT", config.get("project", "MolSynthRL"))
+    os.environ.setdefault("WANDB_PROJECT", config.get("project", "GenMolRL"))
     _trainer(args.algorithm)(config, experiment_name)
 
 

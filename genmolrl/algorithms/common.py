@@ -34,7 +34,7 @@ def run_dir(run_id: str) -> Path:
 
 
 def init_wandb(config: dict, algorithm: str, experiment_name: str):
-    project = os.getenv("WANDB_PROJECT", config.get("project", "MolSynthRL"))
+    project = os.getenv("WANDB_PROJECT", config.get("project", "GenMolRL"))
     init_kw = {
         "project": project,
         "name": experiment_name,
