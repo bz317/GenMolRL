@@ -1,0 +1,16 @@
+template_index	template	valid	positive	positive_round3	zero	negative	positive_fraction
+0	Bischler-Napieralski	26	9	9	0	17	0.34615384615384615
+1	Pictet-Gams	0	0	0	0	0	0.0
+2	Chinonlin-2-one_Intramol	0	0	0	0	0	0.0
+3	Tetrazol_formation	436	377	377	0	59	0.8646788990825688
+4	Dieckmann_5-ring	3	0	0	0	3	0.0
+5	Dieckmann_6-ring	2	0	0	0	2	0.0
+6	FGI_Acyl_chloride	3953	1004	995	0	2949	0.2539843157095877
+7	FGI_bromination	4135	2457	2448	0	1678	0.5941958887545344
+8	FGI_chlorination	4135	1537	1532	0	2598	0.3717049576783555
+9	FGI_sulfonyl_chloride	6	6	6	0	0	1.0
+10	Aminothiazol_formation	114	114	114	0	0	1.0
+11	FGA_alpha_bromination	3458	1228	1224	0	2230	0.3551185656448814
+12	FGA_alpha_chlorination	3458	1036	1031	0	2422	0.29959514170040485
+13	FGI_Rosenmund-von_Braun	3650	871	849	0	2779	0.23863013698630137
+14	FGI_nitrilation	3277	663	659	0	2614	0.20231919438510834

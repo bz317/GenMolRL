@@ -1,0 +1,12 @@
+Uni test balanced molecule set
+source_file: data/Uni/reactants_test.pkl
+output_file: data/Uni/reactants_test_balance.pkl
+selected_table: debug/uni_test_balance_selected_molecules.tsv
+selected_molecules: 9506
+molecules_with_positive_action: 4753
+molecule_positive_fraction: 0.5
+valid_actions: 16587
+positive_actions: 8293
+action_positive_fraction: 0.4999698559112558
+positive_pool_size: 5762
+nonpositive_pool_size: 6927

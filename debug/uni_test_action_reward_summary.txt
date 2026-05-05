@@ -1,0 +1,41 @@
+Uni test action reward sweep
+test_file: data/Uni/reactants_test.pkl
+templates_file: data/Uni/templates_unimolecolar_explicit.pkl
+molecules: 12689
+templates: 15
+valid_actions: 26653
+positive_delta_actions_raw: 9302
+positive_delta_actions_rounded3: 9244
+negative_delta_actions: 17351
+zero_delta_actions: 0
+positive_fraction_raw: 0.34900386448054627
+positive_fraction_rounded3: 0.346827749221476
+molecules_with_no_valid_actions: 5
+molecules_with_no_positive_actions_raw: 6927
+molecules_with_positive_action_raw: 5762
+best_delta_qed: 0.3817833498601284
+best_delta_start_smiles: C#CCn1c(C)cc(C(=O)CCl)c1C
+best_delta_template: Aminothiazol_formation
+best_delta_product: C#CCn1c(C)cc(-c2cnc(N)s2)c1C
+elapsed_seconds: 131.56
+
+valid_action_count_histogram:
+  0: 5
+  1: 5067
+  2: 2246
+  3: 4630
+  4: 537
+  5: 168
+  6: 36
+positive_delta_count_histogram_raw:
+  0: 6927
+  1: 3171
+  2: 1848
+  3: 619
+  4: 50
+  5: 66
+  6: 8
+
+per_molecule_table: debug/uni_test_action_reward_counts.tsv
+positive_actions_table: debug/uni_test_positive_actions.tsv
+template_summary_table: debug/uni_test_template_reward_summary.tsv

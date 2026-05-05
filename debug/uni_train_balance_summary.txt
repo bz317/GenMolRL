@@ -1,0 +1,12 @@
+Uni train balanced molecule set
+source_file: data/Uni/reactants_train.pkl
+output_file: data/Uni/reactants_train_balance.pkl
+selected_table: debug/uni_train_balance_selected_molecules.tsv
+selected_molecules: 38770
+molecules_with_positive_action: 19385
+molecule_positive_fraction: 0.5
+valid_actions: 68203
+positive_actions: 34102
+action_positive_fraction: 0.5000073310558186
+positive_pool_size: 22801
+nonpositive_pool_size: 27955
