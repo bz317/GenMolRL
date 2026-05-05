@@ -1,4 +1,4 @@
-"""Random and greedy search baselines over the shared GenMolRL chemistry layer."""
+"""Non-neural search baselines over the shared GenMolRL chemistry layer."""
 
 from __future__ import annotations
 
@@ -37,11 +37,12 @@ class SearchRunner:
 
     `random_search` randomly chooses one valid template and, for Bi templates, one
     valid R2. `greedy_search` enumerates valid candidates at each step and picks
-    the candidate with the highest configured reward.
+    the candidate with the highest configured reward. `exhausted_search`
+    enumerates every valid trajectory from each configured test molecule.
     """
 
     def __init__(self, config: dict, experiment_name: str, mode: str):
-        if mode not in {"random_search", "greedy_search"}:
+        if mode not in {"random_search", "greedy_search", "exhausted_search"}:
             raise ValueError(f"Unsupported search mode: {mode}")
         self.config = config
         self.mode = mode
@@ -54,17 +55,29 @@ class SearchRunner:
             invalid_penalty=float(config.get("env", {}).get("invalid_reaction_penalty", -1.0)),
             round_digits=config.get("env", {}).get("reward_round_digits"),
         )
-        self.max_steps = int(self.search_cfg.get("max_steps", config.get("env", {}).get("max_steps", 5)))
-        self.max_paths = int(self.search_cfg.get("max_paths", 100))
-        self.max_attempts = int(self.search_cfg.get("max_attempts", 1000))
-        self.max_reactions = int(self.search_cfg.get("max_reactions", 10000))
-        self.max_r2_per_template = int(self.search_cfg.get("max_r2_per_template", 100))
+        env_cfg = config.get("env", {})
+        self.max_steps = int(
+            config.get(
+                "max_episode_len",
+                self.search_cfg.get(
+                    "max_episode_len",
+                    self.search_cfg.get("max_steps", env_cfg.get("max_episode_len", env_cfg.get("max_steps", 5))),
+                ),
+            )
+        )
+        self.max_paths = self._optional_int("max_paths", None if mode == "exhausted_search" else 100)
+        self.max_attempts = self._optional_int("max_attempts", 1000)
+        self.max_reactions = self._optional_int("max_reactions", None if mode == "exhausted_search" else 10000)
+        self.max_starts = self._optional_int("max_starts", None)
+        self.max_r2_per_template = self._optional_int("max_r2_per_template", None if mode == "exhausted_search" else 100)
         self.overwrite_results = bool(self.search_cfg.get("overwrite_results", True))
         self.seed = int(config.get("training", {}).get("seed", 42))
         random.seed(self.seed)
         np.random.seed(self.seed)
 
-        reactant_pool_file = self.dataset.get("test_file", self.dataset["training_file"])
+        reactant_pool_file = self.dataset.get("test_file")
+        if reactant_pool_file is None:
+            raise KeyError("dataset.test_file must be set for search baselines")
         reactants = load_pickle(repo_root() / reactant_pool_file)
         templates = load_pickle(repo_root() / self.dataset["templates_file"])
         all_manager = ReactionManager(templates, reactants)
@@ -99,6 +112,12 @@ class SearchRunner:
             wandb.init(**init_kw)
         self.all_steps: list[SearchStep] = []
 
+    def _optional_int(self, key: str, default: int | None) -> int | None:
+        value = self.search_cfg.get(key, default)
+        if value is None:
+            return None
+        return int(value)
+
     def _template_name(self, idx: int) -> str:
         return str(self.manager.templates[idx].get("name", self.manager.templates[idx].get("Reaction", idx)))
 
@@ -109,7 +128,7 @@ class SearchRunner:
             if self.mode == "random_search":
                 random.shuffle(partners)
                 partners = partners[:1]
-            else:
+            elif self.max_r2_per_template is not None:
                 partners = partners[: self.max_r2_per_template]
             out = []
             for r2 in partners:
@@ -149,6 +168,13 @@ class SearchRunner:
         reward, idx, product, r2 = max(candidates, key=lambda x: x[0])
         return idx, product, r2, reward
 
+    def _all_next(self, current: str) -> list[tuple[int, str, str | None, float]]:
+        candidates = []
+        for idx in self._valid_template_indices(current):
+            for product, r2, reward in self._candidate_products(current, idx):
+                candidates.append((idx, product, r2, reward))
+        return candidates
+
     def _write_report(self, summary: dict) -> None:
         fields = [
             "path_id",
@@ -171,15 +197,63 @@ class SearchRunner:
                 row = step.__dict__
                 f.write("\t".join("" if row[k] is None else str(row[k]) for k in fields) + "\n")
 
-    def run(self):
+    def _reached_limit(self, saved_paths: int, total_reactions: int) -> bool:
+        if self.max_paths is not None and saved_paths >= self.max_paths:
+            return True
+        return self.max_reactions is not None and total_reactions >= self.max_reactions
+
+    def _log_search_progress(
+        self,
+        *,
+        attempts: int,
+        saved_paths: int,
+        total_reactions: int,
+        last_path_length: int,
+        initial_qed: float,
+        terminal_qed: float,
+        best_qed: float,
+    ) -> None:
+        if not self.use_wandb:
+            return
+        wandb.log(
+            {
+                "train/global_step": attempts,
+                "search/attempts": attempts,
+                "search/saved_paths": saved_paths,
+                "search/total_reactions": total_reactions,
+                "search/last_path_length": last_path_length,
+                "search/last_initial_qed": round(initial_qed, 3),
+                "search/last_terminal_qed": terminal_qed,
+                "search/last_net_qed_gain": terminal_qed - round(initial_qed, 3),
+                "search/best_qed": best_qed,
+            },
+            step=attempts,
+        )
+
+    def _summary(self, attempts: int, saved_paths: int, total_reactions: int, best_qed: float) -> dict:
+        return {
+            "attempts": attempts,
+            "saved_paths": saved_paths,
+            "total_reactions": total_reactions,
+            "best_qed": best_qed,
+            "results_file": str(self.result_file),
+        }
+
+    def _finish(self, summary: dict) -> dict:
+        self._write_report(summary)
+        if self.use_wandb:
+            wandb.finish()
+        return summary
+
+    def _run_random_or_greedy(self):
         saved_paths = 0
         attempts = 0
         total_reactions = 0
         best_qed = 0.0
         while (
-            saved_paths < self.max_paths
+            (self.max_paths is None or saved_paths < self.max_paths)
             and attempts < self.max_attempts
-            and total_reactions < self.max_reactions
+            and (self.max_reactions is None or total_reactions < self.max_reactions)
         ):
             attempts += 1
             current = self._sample_start()
@@ -197,7 +271,7 @@ class SearchRunner:
                 )
             ]
             for step_idx in range(1, self.max_steps + 1):
-                if total_reactions >= self.max_reactions:
+                if self.max_reactions is not None and total_reactions >= self.max_reactions:
                     break
                 chosen = self._choose_next(current)
                 if chosen is None:
@@ -223,33 +297,123 @@ class SearchRunner:
             if reaction_steps > 0:
                 self.all_steps.extend(path_rows)
                 saved_paths += 1
-            if self.use_wandb:
-                terminal_qed = path_rows[-1].qed
-                wandb.log(
-                    {
-                        "train/global_step": attempts,
-                        "search/attempts": attempts,
-                        "search/saved_paths": saved_paths,
-                        "search/total_reactions": total_reactions,
-                        "search/last_path_length": reaction_steps,
-                        "search/last_initial_qed": round(initial_qed, 3),
-                        "search/last_terminal_qed": terminal_qed,
-                        "search/last_net_qed_gain": terminal_qed - round(initial_qed, 3),
-                        "search/best_qed": best_qed,
-                    },
-                    step=attempts,
+            self._log_search_progress(
+                attempts=attempts,
+                saved_paths=saved_paths,
+                total_reactions=total_reactions,
+                last_path_length=reaction_steps,
+                initial_qed=initial_qed,
+                terminal_qed=path_rows[-1].qed,
+                best_qed=best_qed,
+            )
+        return self._finish(self._summary(attempts, saved_paths, total_reactions, best_qed))
+
+    def _run_exhausted(self):
+        saved_paths = 0
+        starts_seen = 0
+        total_reactions = 0
+        best_qed = 0.0
+
+        def save_terminal(path_rows: list[SearchStep], initial_qed: float) -> None:
+            nonlocal saved_paths, best_qed
+            if self.max_paths is not None and saved_paths >= self.max_paths:
+                return
+            finalized = []
+            for row in path_rows:
+                finalized.append(
+                    SearchStep(
+                        path_id=saved_paths,
+                        step=row.step,
+                        reactant=row.reactant,
+                        template=row.template,
+                        product=row.product,
+                        qed=row.qed,
+                        reward=row.reward,
+                        second_reactant=row.second_reactant,
+                    )
                 )
-        summary = {
-            "attempts": attempts,
-            "saved_paths": saved_paths,
-            "total_reactions": total_reactions,
-            "best_qed": best_qed,
-            "results_file": str(self.result_file),
-        }
-        self._write_report(summary)
-        if self.use_wandb:
-            wandb.finish()
-        return summary
+            self.all_steps.extend(finalized)
+            saved_paths += 1
+            best_qed = max(best_qed, path_rows[-1].qed)
+            self._log_search_progress(
+                attempts=starts_seen,
+                saved_paths=saved_paths,
+                total_reactions=total_reactions,
+                last_path_length=len(path_rows) - 1,
+                initial_qed=initial_qed,
+                terminal_qed=path_rows[-1].qed,
+                best_qed=best_qed,
+            )
+
+        def dfs(current: str, path_rows: list[SearchStep], initial_qed: float) -> None:
+            nonlocal total_reactions, best_qed
+            if self._reached_limit(saved_paths, total_reactions):
+                return
+            step_idx = len(path_rows) - 1
+            if step_idx >= self.max_steps:
+                save_terminal(path_rows, initial_qed)
+                return
+            next_actions = self._all_next(current)
+            if not next_actions:
+                save_terminal(path_rows, initial_qed)
+                return
+            for template_idx, product, r2, reward in next_actions:
+                if self._reached_limit(saved_paths, total_reactions):
+                    return
+                q = qed(product)
+                best_qed = max(best_qed, q)
+                total_reactions += 1
+                dfs(
+                    product,
+                    path_rows
+                    + [
+                        SearchStep(
+                            path_id=-1,
+                            step=step_idx + 1,
+                            reactant=current,
+                            template=self._template_name(template_idx),
+                            product=product,
+                            qed=round(q, 3),
+                            reward=reward,
+                            second_reactant=r2,
+                        )
+                    ],
+                    initial_qed,
+                )
+
+        for start in self.reactant_keys:
+            if self._reached_limit(saved_paths, total_reactions):
+                break
+            if self.max_starts is not None and starts_seen >= self.max_starts:
+                break
+            if not _valid_smiles(start):
+                continue
+            starts_seen += 1
+            initial_qed = qed(start)
+            dfs(
+                start,
+                [
+                    SearchStep(
+                        path_id=-1,
+                        step=0,
+                        reactant=start,
+                        template="START",
+                        product=start,
+                        qed=round(initial_qed, 3),
+                        reward=0.0,
+                        second_reactant=None,
+                    )
+                ],
+                initial_qed,
+            )
+        summary = self._summary(starts_seen, saved_paths, total_reactions, best_qed)
+        summary["starts_seen"] = starts_seen
+        return self._finish(summary)
+
+    def run(self):
+        if self.mode == "exhausted_search":
+            return self._run_exhausted()
+        return self._run_random_or_greedy()
 
 
 def train(config: dict, experiment_name: str, *, mode: str):

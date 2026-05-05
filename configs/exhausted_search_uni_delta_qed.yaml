@@ -1,5 +1,5 @@
 project: MolSynthRL
-experiment_name: GreedySearch_Uni
+experiment_name: ExhaustedSearch_Uni
 reaction_mode: uni
 masking: reaction_valid
 reward: delta_qed
@@ -13,10 +13,10 @@ env:
 training:
   seed: 42
 search:
-  max_paths: 100
-  max_attempts: 1000
-  max_reactions: 10000
-  max_r2_per_template: 100
-  results_file: GenMolRL/runs/greedy_search_uni_results.txt
+  max_paths:
+  max_reactions:
+  max_starts:
+  max_r2_per_template:
+  results_file: GenMolRL/runs/exhausted_search_uni_results.txt
   overwrite_results: true
   use_wandb: true

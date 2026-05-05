@@ -54,6 +54,7 @@ def init_wandb(config: dict, algorithm: str, experiment_name: str):
 def env_kwargs(config: dict, *, eval_env: bool = False) -> dict:
     dataset = config["dataset"]
     env_cfg = config["env"]
+    max_episode_len = config.get("max_episode_len", env_cfg.get("max_episode_len", env_cfg.get("max_steps", 5)))
     reactant_file = dataset["training_file"] if not eval_env else dataset.get("test_file")
     if reactant_file is None:
         raise KeyError("dataset.test_file must be set for evaluation environments")
@@ -65,7 +66,7 @@ def env_kwargs(config: dict, *, eval_env: bool = False) -> dict:
         "action_design": env_cfg.get("action_design", "discrete"),
         "masking": config["masking"],
         "reward": config["reward"],
-        "max_steps": env_cfg.get("max_steps", 5),
+        "max_steps": max_episode_len,
         "use_stop_action": env_cfg.get("use_stop_action", True),
         "stop_early_penalty": env_cfg.get("stop_early_penalty", 0.0),
         "stop_penalty_until_step": env_cfg.get("stop_penalty_until_step", -1),

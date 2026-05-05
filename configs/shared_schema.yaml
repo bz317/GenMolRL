@@ -4,8 +4,9 @@ experiment_name: string
 reaction_mode: uni # uni | bi
 masking: substructure # substructure | reaction_valid | r2_available | none
 reward: delta_qed # delta_qed | final_qed
+max_episode_len: 5
 dataset:
-  training_file: path
+  training_file: path # PPO/A2C/TD3 only
   test_file: path
   templates_file: path
   start_strategy: random_pool # random_pool | cycle_file | fixed | learned_policy
@@ -15,7 +16,6 @@ dataset:
 env:
   algorithm_family: sb3_discrete # sb3_discrete | sb3_multidiscrete | td3_pgfs
   action_design: discrete # discrete | multidiscrete_factorized | pgfs_continuous_r2
-  max_steps: 5
   use_stop_action: true
   stop_early_penalty: 0.0
   stop_penalty_until_step: -1
@@ -26,3 +26,12 @@ training:
   seed: 42
   total_timesteps: 1000000
   n_envs: 1
+search:
+  max_paths: null
+  max_attempts: null
+  max_reactions: null
+  max_starts: null
+  max_r2_per_template: null
+  results_file: path
+  overwrite_results: true
+  use_wandb: true

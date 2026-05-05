@@ -146,6 +146,7 @@ Use the wrapper scripts from the repository root:
 ./run_genmolrl_td3.sh
 ./run_genmolrl_random_search.sh
 ./run_genmolrl_greedy_search.sh
+./run_genmolrl_exhausted_search.sh
 ```
 
 Or call the unified launcher directly:
@@ -166,20 +167,20 @@ EXPERIMENT_NAME=PPO_Uni_test ./run_genmolrl_ppo.sh
 MASKING=none ./run_genmolrl_ppo.sh
 REWARD=final_qed ./run_genmolrl_a2c.sh
 REACTION_MODE=bi ./run_genmolrl_td3.sh
+MAX_EPISODE_LEN=3 ./run_genmolrl_ppo.sh
 WANDB_MODE=disabled ./run_genmolrl_random_search.sh
 WANDB_MODE=disabled ./run_genmolrl_ppo.sh
 ```
 
-Random and greedy search runners also accept dataset path overrides:
+Search runners also accept dataset path overrides:
 
 ```bash
-TRAIN_FILE=GenMolRL/data/Uni/reactants_train.pkl \
 TEST_FILE=GenMolRL/data/Uni/reactants_test.pkl \
 TEMPLATE_FILE=GenMolRL/data/Uni/templates_unimolecolar_explicit.pkl \
 ./run_genmolrl_random_search.sh
 ```
 
-`TRAINING_FILE` and `TEMPLATES_FILE` are also accepted. Set `STAGE_DATA=false` if you do not want the runner to refresh `GenMolRL/data/Uni` before launching.
+`TEMPLATES_FILE` is also accepted. Search baselines are test-only, so they use `TEST_FILE` and do not require a train data path. Set `STAGE_DATA=false` if you do not want the runner to refresh `GenMolRL/data/Uni` before launching.
 
 ## Supported Algorithms
 
@@ -221,17 +222,27 @@ The text report includes a `START` row for each saved path (`step=0`) followed b
 
 For `reward: delta_qed`, greedy search maximizes QED improvement at each step. For `reward: final_qed`, it maximizes product QED.
 
+### Exhausted Search
+
+`exhausted_search` is a deterministic non-neural baseline. It goes through the molecules in `dataset.test_file` one by one. For each start molecule, it recursively enumerates every valid next reaction under the configured masking mode. A trajectory is saved when either:
+
+- there is no valid next action from the current molecule, or
+- the trajectory reaches `max_episode_len`.
+
+By default, the exhaustive config leaves `max_paths`, `max_reactions`, `max_starts`, and `max_r2_per_template` unset, so it attempts the full search space. This can become very large, especially for Bi mode. Set those fields in the config for a bounded debug run.
+
 Search stopping controls:
 
 ```yaml
+max_episode_len: 5     # max reaction depth per trajectory, all methods
 search:
-  max_steps: 5        # max reaction depth per path
   max_paths: 100      # max saved successful paths
   max_attempts: 1000  # max attempted starts
   max_reactions: 10000
+  max_starts: null    # exhausted_search only: max test starts to enumerate
 ```
 
-These search settings are local to random/greedy search and do not affect PPO, A2C, or TD3 configs.
+These search settings are local to non-neural search and do not affect PPO, A2C, or TD3 configs.
 
 ## Reaction Modes
 

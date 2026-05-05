@@ -3,6 +3,7 @@ experiment_name: PPO_Uni
 reaction_mode: uni
 masking: reaction_valid
 reward: delta_qed
+max_episode_len: 5
 dataset:
   training_file: GenMolRL/data/Uni/reactants_train.pkl
   test_file: GenMolRL/data/Uni/reactants_test.pkl
@@ -12,7 +13,6 @@ dataset:
 env:
   algorithm_family: sb3_discrete
   action_design: discrete
-  max_steps: 5
   use_stop_action: true
   stop_early_penalty: 0.0
   stop_penalty_until_step: 3

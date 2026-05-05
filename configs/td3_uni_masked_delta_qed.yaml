@@ -3,6 +3,7 @@ experiment_name: TD3_Uni
 reaction_mode: uni
 masking: r2_available
 reward: delta_qed
+max_episode_len: 5
 dataset:
   training_file: GenMolRL/data/Uni/reactants_train.pkl
   test_file: GenMolRL/data/Uni/reactants_test.pkl
@@ -12,7 +13,6 @@ dataset:
 env:
   algorithm_family: td3_pgfs
   action_design: pgfs_continuous_r2
-  max_steps: 5
   use_stop_action: false
   invalid_reaction_penalty: -1.0
 training:

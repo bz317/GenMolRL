@@ -15,7 +15,7 @@ def _trainer(algorithm: str):
         from genmolrl.algorithms.a2c.train import train
     elif algorithm == "td3":
         from genmolrl.algorithms.td3.train import train
-    elif algorithm in {"random_search", "greedy_search"}:
+    elif algorithm in {"random_search", "greedy_search", "exhausted_search"}:
         from genmolrl.algorithms.search import train as search_train
 
         def train(config: dict, experiment_name: str):
@@ -27,12 +27,17 @@ def _trainer(algorithm: str):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a GenMolRL experiment")
-    parser.add_argument("--algorithm", choices=["ppo", "a2c", "td3", "random_search", "greedy_search"], required=True)
+    parser.add_argument(
+        "--algorithm",
+        choices=["ppo", "a2c", "td3", "random_search", "greedy_search", "exhausted_search"],
+        required=True,
+    )
     parser.add_argument("--reaction-mode", choices=["uni", "bi"])
     parser.add_argument("--masking", choices=["substructure", "reaction_valid", "r2_available", "none"])
     parser.add_argument("--reward", choices=["delta_qed", "final_qed"])
     parser.add_argument("--config", required=True)
     parser.add_argument("--experiment-name")
+    parser.add_argument("--max-episode-len", type=int, help="Override maximum trajectory length")
     parser.add_argument("--training-file", help="Override dataset.training_file from the config")
     parser.add_argument("--test-file", help="Override dataset.test_file from the config")
     parser.add_argument("--templates-file", help="Override dataset.templates_file from the config")
@@ -46,6 +51,8 @@ def main() -> None:
         config["masking"] = args.masking
     if args.reward:
         config["reward"] = args.reward
+    if args.max_episode_len is not None:
+        config["max_episode_len"] = args.max_episode_len
     dataset_overrides = {
         "training_file": args.training_file,
         "test_file": args.test_file,
