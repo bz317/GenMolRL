@@ -19,7 +19,7 @@ def repo_root() -> Path:
 def load_config(path: str | Path) -> dict[str, Any]:
     cfg_path = Path(path)
     if not cfg_path.is_file():
-        cfg_path = repo_root() / cfg_path
+        cfg_path = project_root() / cfg_path
     with cfg_path.open("r", encoding="utf-8") as f:
         loaded = yaml.safe_load(f) or {}
     if not isinstance(loaded, dict):
@@ -43,4 +43,4 @@ def resolve_path(path: str | None, *, base: Path | None = None) -> str | None:
     p = Path(path)
     if p.is_absolute():
         return str(p)
-    return str((base or repo_root()) / p)
+    return str((base or project_root()) / p)

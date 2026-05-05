@@ -11,14 +11,11 @@ import wandb
 from genmolrl.algorithms.common import env_kwargs, init_wandb, set_seed
 from genmolrl.algorithms.td3.agent import TD3Agent
 from genmolrl.algorithms.td3.knn import KNNWrapper
-from genmolrl.algorithms.td3.legacy_imports import ensure_legacy_pgfs_on_path
+from genmolrl.algorithms.td3.random_selector import select_random_action
 from genmolrl.algorithms.td3.replay_buffer import ReplayBuffer
 from genmolrl.config import project_root
 from genmolrl.logging.wandb_metrics import define_ppo_compatible_metrics
 from genmolrl.registry import ENV_ID, register_envs
-
-ensure_legacy_pgfs_on_path()
-from src.models.pgfs.utility.random_selector import select_random_action  # noqa: E402
 
 import gymnasium as gym  # noqa: E402
 

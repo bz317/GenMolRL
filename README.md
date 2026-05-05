@@ -7,8 +7,7 @@ The first goal is behavior-compatible migration of:
 - `exp_branch_run_PPO_mask_extendedObs.sh`
 - `exp_branch_run_A2C_mask.sh`
 - `run_td3.sh`
-- `run_random_search.sh`
-- legacy greedy search scripts under `designing-new-molecules/src/training/`
+- Random Search, Greedy Search, and Exhausted Search baselines
 
 The second goal is to provide a structured place for future methods such as SynFlowNet and REINVENT scaffold decorator.
 
@@ -33,13 +32,13 @@ GenMolRL/
 GenMolRL currently uses the repository-level conda environment exported at:
 
 ```text
-/home/bz317/new_mol_with_RL_GNN/conda_env_RL_for_new_mol.yml
+conda_env_RL_for_new_mol.yml
 ```
 
 Create the environment from scratch:
 
 ```bash
-cd /home/bz317/new_mol_with_RL_GNN
+cd <repo-root>
 conda env create -f conda_env_RL_for_new_mol.yml
 conda activate RL_for_new_mol
 ```
@@ -47,7 +46,7 @@ conda activate RL_for_new_mol
 If the environment already exists and you want to update it from the file:
 
 ```bash
-cd /home/bz317/new_mol_with_RL_GNN
+cd <repo-root>
 conda env update -n RL_for_new_mol -f conda_env_RL_for_new_mol.yml --prune
 conda activate RL_for_new_mol
 ```
@@ -57,14 +56,14 @@ The environment includes the main dependencies used by the current experiments, 
 GenMolRL is not installed as a site package by default. Run commands with `PYTHONPATH=GenMolRL` from the repository root:
 
 ```bash
-cd /home/bz317/new_mol_with_RL_GNN
-PYTHONPATH=GenMolRL python -m genmolrl.scripts.stage_data
+cd <repo-root>
+./run_genmolrl_ppo.sh
 ```
 
 Optional editable install:
 
 ```bash
-cd /home/bz317/new_mol_with_RL_GNN/GenMolRL
+cd <repo-root>/GenMolRL
 python -m pip install -e .
 ```
 
@@ -79,7 +78,7 @@ wandb login
 or place the API key in the existing repository-level file:
 
 ```text
-/home/bz317/new_mol_with_RL_GNN/wandb_api_key.txt
+wandb_api_key.txt
 ```
 
 The wrapper scripts read this file automatically. To disable cloud logging for smoke tests:
@@ -91,47 +90,54 @@ WANDB_MODE=disabled ./run_genmolrl_ppo.sh
 Quick installation check:
 
 ```bash
-cd /home/bz317/new_mol_with_RL_GNN
+cd <repo-root>
 conda activate RL_for_new_mol
 PYTHONPATH=GenMolRL python -m compileall -q GenMolRL/genmolrl
-PYTHONPATH=GenMolRL python -m genmolrl.scripts.stage_data
 ```
 
-## Data Staging
+## Data
 
-The current Uni experiments use the same staged files as the old scripts, copied from:
+GenMolRL is self-contained when the following files are present:
 
 ```text
-designing-new-molecules/data/train_test_split/uni_molecular/
+data/Uni/reactants_train.pkl
+data/Uni/reactants_test.pkl
+data/Uni/templates_unimolecolar_explicit.pkl
 ```
 
-Stage them with:
+Check the staged files with:
 
 ```bash
 PYTHONPATH=GenMolRL python -m genmolrl.scripts.stage_data
 ```
 
-This creates the canonical Uni directory:
+The command above only validates and reports the existing `data/Uni` layout. It does not depend on the old source tree. If you intentionally want to regenerate the staged files from an external split, pass that source explicitly:
+
+```bash
+PYTHONPATH=GenMolRL python -m genmolrl.scripts.stage_data --source-dir <external-uni-split-dir>
+```
+
+The canonical Uni directory, relative to the `GenMolRL/` project root, is:
 
 ```text
-GenMolRL/data/Uni/reactants_train.pkl
-GenMolRL/data/Uni/reactants_test.pkl
-GenMolRL/data/Uni/templates_unimolecolar_explicit.pkl
+data/Uni/reactants_train.pkl
+data/Uni/reactants_test.pkl
+data/Uni/templates_unimolecolar_explicit.pkl
 ```
 
 It also creates derived compatibility files in the same directory:
 
 ```text
-GenMolRL/data/Uni/reactants_full.pkl
-GenMolRL/data/Uni/eval_start_smiles.txt
+data/Uni/reactants_full.pkl
+data/Uni/eval_start_smiles.txt
 ```
 
 `reactants_train.pkl` is used for training, `reactants_test.pkl` is used for testing/search, and `eval_start_smiles.txt` contains the test SMILES for deterministic evaluation starts. `reactants_full.pkl` is still staged as a convenience merged pool, but it is not used by the current default configs.
 
-The future Bi dataset should live under:
+The future Bi dataset should live under the `GenMolRL/` project root at:
 
 ```text
-GenMolRL/data/Bi/
+data/Bi/
 ```
 
 That directory is intentionally empty for now. The spelling `unimolecolar` is preserved because existing data and scripts use that filename.
@@ -157,7 +163,7 @@ PYTHONPATH=GenMolRL python -m genmolrl.scripts.run_experiment \
   --reaction-mode uni \
   --masking reaction_valid \
   --reward delta_qed \
-  --config GenMolRL/configs/ppo_uni_masked_delta_qed.yaml
+  --config configs/ppo_uni_masked_delta_qed.yaml
 ```
 
 Common environment overrides:
@@ -175,12 +181,12 @@ WANDB_MODE=disabled ./run_genmolrl_ppo.sh
 Search runners also accept dataset path overrides:
 
 ```bash
-TEST_FILE=GenMolRL/data/Uni/reactants_test.pkl \
-TEMPLATE_FILE=GenMolRL/data/Uni/templates_unimolecolar_explicit.pkl \
+TEST_FILE=data/Uni/reactants_test.pkl \
+TEMPLATE_FILE=data/Uni/templates_unimolecolar_explicit.pkl \
 ./run_genmolrl_random_search.sh
 ```
 
-`TEMPLATES_FILE` is also accepted. Search baselines are test-only, so they use `TEST_FILE` and do not require a train data path. Set `STAGE_DATA=false` if you do not want the runner to refresh `GenMolRL/data/Uni` before launching.
+`TEMPLATES_FILE` is also accepted. Search baselines are test-only, so they use `TEST_FILE` and do not require a train data path. The wrapper scripts use the files already under `data/Uni` by default. Set `STAGE_DATA=true` to validate the staged files before launch, or set both `STAGE_DATA=true` and `STAGE_SOURCE_DIR=<external-uni-split-dir>` when you intentionally want to regenerate the staged files from an external source directory.
 
 ## Supported Algorithms
 
@@ -481,7 +487,7 @@ overall_max_qed
 Outputs are written under:
 
 ```text
-GenMolRL/runs/<run_id>/
+runs/<run_id>/
 ```
 
 ## Compatibility Notes

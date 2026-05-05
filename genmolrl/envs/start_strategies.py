@@ -6,12 +6,14 @@ from pathlib import Path
 
 from rdkit import Chem
 
+from genmolrl.config import resolve_path
+
 
 def load_start_file(path: str | None, reactants: dict) -> list[str]:
     if not path:
         return []
     starts = []
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
+    for line in Path(resolve_path(path)).read_text(encoding="utf-8").splitlines():
         token = line.strip().split()[0] if line.strip() else ""
         if token and token in reactants and token not in starts:
             starts.append(token)

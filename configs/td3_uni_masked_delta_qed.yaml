@@ -5,11 +5,11 @@ masking: r2_available
 reward: delta_qed
 max_episode_len: 5
 dataset:
-  training_file: GenMolRL/data/Uni/reactants_train.pkl
-  test_file: GenMolRL/data/Uni/reactants_test.pkl
-  templates_file: GenMolRL/data/Uni/templates_unimolecolar_explicit.pkl
+  training_file: data/Uni/reactants_train.pkl
+  test_file: data/Uni/reactants_test.pkl
+  templates_file: data/Uni/templates_unimolecolar_explicit.pkl
   start_strategy: random_pool
-  start_smiles_file_eval: GenMolRL/data/Uni/eval_start_smiles.txt
+  start_smiles_file_eval: data/Uni/eval_start_smiles.txt
 env:
   algorithm_family: td3_pgfs
   action_design: pgfs_continuous_r2

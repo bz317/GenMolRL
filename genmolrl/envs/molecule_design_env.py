@@ -12,6 +12,7 @@ from gymnasium import spaces
 from genmolrl.chem.datasets import load_pickle
 from genmolrl.chem.fingerprints import morgan_fp_array
 from genmolrl.chem.reaction_manager import BI_TYPE, ReactionManager
+from genmolrl.config import resolve_path
 from genmolrl.envs.action_spaces import ActionSpaceSpec
 from genmolrl.envs.masking import MaskProvider
 from genmolrl.envs.rewards import RewardFunction, qed
@@ -66,8 +67,8 @@ class MoleculeDesignEnv(gym.Env):
         self.stop_early_penalty = float(stop_early_penalty)
         self.stop_penalty_until_step = int(stop_penalty_until_step)
 
-        self.reactants = load_pickle(Path(reactant_file))
-        raw_templates = load_pickle(Path(template_file))
+        self.reactants = load_pickle(Path(resolve_path(reactant_file)))
+        raw_templates = load_pickle(Path(resolve_path(template_file)))
         all_reactions = ReactionManager(raw_templates, self.reactants)
         self.templates = all_reactions.templates_for_mode(reaction_mode)
         self.reaction_manager = ReactionManager(self.templates, self.reactants)

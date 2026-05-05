@@ -12,7 +12,7 @@ from rdkit import Chem
 import wandb
 from genmolrl.chem.datasets import load_pickle
 from genmolrl.chem.reaction_manager import BI_TYPE, ReactionManager
-from genmolrl.config import repo_root
+from genmolrl.config import project_root, resolve_path
 from genmolrl.envs.rewards import RewardFunction, qed
 
 
@@ -78,8 +78,8 @@ class SearchRunner:
         reactant_pool_file = self.dataset.get("test_file")
         if reactant_pool_file is None:
             raise KeyError("dataset.test_file must be set for search baselines")
-        reactants = load_pickle(repo_root() / reactant_pool_file)
-        templates = load_pickle(repo_root() / self.dataset["templates_file"])
+        reactants = load_pickle(resolve_path(reactant_pool_file))
+        templates = load_pickle(resolve_path(self.dataset["templates_file"]))
         all_manager = ReactionManager(templates, reactants)
         templates_for_mode = all_manager.templates_for_mode(config["reaction_mode"])
         self.manager = ReactionManager(templates_for_mode, reactants)
@@ -87,11 +87,11 @@ class SearchRunner:
         self.result_file = Path(
             self.search_cfg.get(
                 "results_file",
-                f"GenMolRL/runs/{self.mode}_results.txt",
+                f"runs/{self.mode}_results.txt",
             )
         )
         if not self.result_file.is_absolute():
-            self.result_file = repo_root() / self.result_file
+            self.result_file = project_root() / self.result_file
         self.result_file.parent.mkdir(parents=True, exist_ok=True)
         if self.overwrite_results and self.result_file.exists():
             self.result_file.unlink()
@@ -231,12 +231,16 @@ class SearchRunner:
         )
 
     def _summary(self, attempts: int, saved_paths: int, total_reactions: int, best_qed: float) -> dict:
+        try:
+            result_file = str(self.result_file.relative_to(project_root()))
+        except ValueError:
+            result_file = str(self.result_file)
         return {
             "attempts": attempts,
             "saved_paths": saved_paths,
             "total_reactions": total_reactions,
             "best_qed": best_qed,
-            "results_file": str(self.result_file),
+            "results_file": result_file,
         }
 
     def _finish(self, summary: dict) -> dict:

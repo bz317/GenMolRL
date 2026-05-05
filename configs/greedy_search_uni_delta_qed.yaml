@@ -5,8 +5,8 @@ masking: reaction_valid
 reward: delta_qed
 max_episode_len: 5
 dataset:
-  test_file: GenMolRL/data/Uni/reactants_test.pkl
-  templates_file: GenMolRL/data/Uni/templates_unimolecolar_explicit.pkl
+  test_file: data/Uni/reactants_test.pkl
+  templates_file: data/Uni/templates_unimolecolar_explicit.pkl
 env:
   invalid_reaction_penalty: -1.0
   reward_round_digits: 3
@@ -17,6 +17,6 @@ search:
   max_attempts: 1000
   max_reactions: 10000
   max_r2_per_template: 100
-  results_file: GenMolRL/runs/greedy_search_uni_results.txt
+  results_file: runs/greedy_search_uni_results.txt
   overwrite_results: true
   use_wandb: true

@@ -11,7 +11,7 @@ from genmolrl.registry import ENV_ID, register_envs
 
 def test_ppo_uni_env_reset():
     register_envs()
-    cfg = load_config("GenMolRL/configs/ppo_uni_masked_delta_qed.yaml")
+    cfg = load_config("configs/ppo_uni_masked_delta_qed.yaml")
     env = gym.make(ENV_ID, **env_kwargs(cfg))
     obs, info = env.reset(seed=42)
     assert obs.shape[0] == 1040
@@ -22,7 +22,7 @@ def test_ppo_uni_env_reset():
 
 def test_td3_uni_env_reset():
     register_envs()
-    cfg = load_config("GenMolRL/configs/td3_uni_masked_delta_qed.yaml")
+    cfg = load_config("configs/td3_uni_masked_delta_qed.yaml")
     kwargs = env_kwargs(cfg)
     kwargs["algorithm_family"] = "td3_pgfs"
     kwargs["append_action_mask_to_obs"] = False
@@ -37,9 +37,9 @@ def test_non_neural_search_smoke():
     from genmolrl.algorithms.search import train
 
     for mode, cfg_path in [
-        ("random_search", "GenMolRL/configs/random_search_uni_delta_qed.yaml"),
-        ("greedy_search", "GenMolRL/configs/greedy_search_uni_delta_qed.yaml"),
-        ("exhausted_search", "GenMolRL/configs/exhausted_search_uni_delta_qed.yaml"),
+        ("random_search", "configs/random_search_uni_delta_qed.yaml"),
+        ("greedy_search", "configs/greedy_search_uni_delta_qed.yaml"),
+        ("exhausted_search", "configs/exhausted_search_uni_delta_qed.yaml"),
     ]:
         cfg = load_config(cfg_path)
         cfg["search"]["max_paths"] = 1
@@ -47,7 +47,7 @@ def test_non_neural_search_smoke():
         cfg["max_episode_len"] = 2
         cfg["search"]["max_starts"] = 1
         cfg["search"]["use_wandb"] = False
-        cfg["search"]["results_file"] = f"GenMolRL/runs/{mode}_test_smoke.txt"
+        cfg["search"]["results_file"] = f"runs/{mode}_test_smoke.txt"
         result = train(cfg, f"{mode}_smoke", mode=mode)
         assert result["saved_paths"] >= 1
         assert result["results_file"].endswith(".txt")

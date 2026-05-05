@@ -13,7 +13,7 @@ from stable_baselines3.common.env_util import make_vec_env
 from wandb.integration.sb3 import WandbCallback
 
 import wandb
-from genmolrl.config import project_root, repo_root
+from genmolrl.config import project_root, resolve_path
 from genmolrl.logging.callbacks import EpisodeWandbCallback
 from genmolrl.logging.wandb_metrics import define_ppo_compatible_metrics
 from genmolrl.registry import ENV_ID, register_envs
@@ -59,8 +59,8 @@ def env_kwargs(config: dict, *, eval_env: bool = False) -> dict:
     if reactant_file is None:
         raise KeyError("dataset.test_file must be set for evaluation environments")
     kwargs = {
-        "reactant_file": reactant_file,
-        "template_file": dataset["templates_file"],
+        "reactant_file": resolve_path(reactant_file),
+        "template_file": resolve_path(dataset["templates_file"]),
         "reaction_mode": config["reaction_mode"],
         "algorithm_family": env_cfg["algorithm_family"],
         "action_design": env_cfg.get("action_design", "discrete"),
@@ -78,14 +78,14 @@ def env_kwargs(config: dict, *, eval_env: bool = False) -> dict:
     }
     if eval_env and dataset.get("start_smiles_file_eval"):
         kwargs["start_strategy"] = "cycle_file"
-        kwargs["start_smiles_file"] = dataset["start_smiles_file_eval"]
+        kwargs["start_smiles_file"] = resolve_path(dataset["start_smiles_file_eval"])
     elif dataset.get("fixed_start_smiles"):
         kwargs["start_strategy"] = "fixed"
         kwargs["fixed_start_smiles"] = dataset["fixed_start_smiles"]
     else:
         kwargs["start_strategy"] = dataset.get("start_strategy", "random_pool")
         if dataset.get("start_smiles_file"):
-            kwargs["start_smiles_file"] = dataset["start_smiles_file"]
+            kwargs["start_smiles_file"] = resolve_path(dataset["start_smiles_file"])
     return kwargs
 
 
