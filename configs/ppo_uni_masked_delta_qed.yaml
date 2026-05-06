@@ -21,6 +21,7 @@ env:
 training:
   seed: 42
   total_timesteps: 1000000
+  eval_freq: 10000
   n_envs: 1
 ppo:
   learning_rate: 0.0003
@@ -33,6 +34,7 @@ ppo:
   ent_coef: 0.0
   vf_coef: 0.5
   max_grad_norm: 0.5
+  target_kl: 0.02
   progress_bar: false
 callbacks:
   model_save_freq: 5000

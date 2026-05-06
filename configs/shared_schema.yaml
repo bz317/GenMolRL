@@ -27,6 +27,8 @@ training:
   start_timesteps: 10000
   eval_freq: 10000
   n_envs: 1
+ppo:
+  target_kl: null
 search:
   max_paths: null
   max_attempts: null

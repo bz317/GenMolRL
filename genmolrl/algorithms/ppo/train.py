@@ -32,6 +32,7 @@ def train(config: dict, experiment_name: str):
         ent_coef=float(ppo_cfg.get("ent_coef", 0.0)),
         vf_coef=float(ppo_cfg.get("vf_coef", 0.5)),
         max_grad_norm=float(ppo_cfg.get("max_grad_norm", 0.5)),
+        target_kl=ppo_cfg.get("target_kl"),
         tensorboard_log=str(run.dir),
         verbose=1,
         seed=seed,

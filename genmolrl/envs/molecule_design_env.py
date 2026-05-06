@@ -204,7 +204,7 @@ class MoleculeDesignEnv(gym.Env):
                 kind=self.mask_provider.mode,
             )
         )
-        truncated = not has_next_template
+        truncated = (not has_next_template) and not self.use_stop_action
         return self._get_obs(), float(reward), terminated, truncated, self._get_info()
 
     def render(self):

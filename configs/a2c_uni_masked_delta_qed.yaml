@@ -21,6 +21,7 @@ env:
 training:
   seed: 42
   total_timesteps: 1000000
+  eval_freq: 10000
   n_envs: 1
 a2c:
   learning_rate: 0.0007
