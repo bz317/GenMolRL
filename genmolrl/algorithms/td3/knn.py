@@ -32,6 +32,8 @@ class KNNWrapper(gym.ActionWrapper):
     def _initialize_index_for_template(self, template_index: int) -> None:
         if template_index in self.knn_indices:
             return
+        if template_index >= len(self.env.unwrapped.templates):
+            return
         if self.env.unwrapped.templates[template_index]["type"] != "bimolecular":
             return
         valid_reactants = self.env.unwrapped.reaction_manager.get_valid_reactants(template_index)
@@ -53,6 +55,8 @@ class KNNWrapper(gym.ActionWrapper):
         template_index = torch.argmax(template_one_hot).item()
         if not self.enabled:
             return template_index, (reactant_vector if isinstance(reactant_vector, str) else None)
+        if template_index >= len(self.env.unwrapped.templates):
+            return template_index, None
 
         reactant_vector = (reactant_vector >= 0).float()
         self._initialize_index_for_template(template_index)

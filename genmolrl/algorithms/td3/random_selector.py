@@ -12,15 +12,17 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def select_random_action(env, smiles_string):
     rm = env.unwrapped.reaction_manager
     templates = env.unwrapped.templates
-    feasible = rm.feasible_first_reactant_templates(smiles_string)
+    mask_kind = getattr(env.unwrapped.mask_provider, "mode", "r2_available")
+    feasible = rm.feasible_first_reactant_templates(smiles_string, kind=mask_kind)
     if not feasible:
-        mask = rm.get_mask(smiles_string)
+        mask = rm.get_mask(smiles_string, kind=mask_kind)
         if mask is None or int(mask.sum().item()) == 0:
             raise ValueError("No valid templates found for the given SMILES string.")
         raise ValueError("No feasible template: bimolecular partners missing for all applicable templates.")
 
     selected_idx = random.choice(feasible)
-    template_one_hot = torch.zeros(len(templates), device=device)
+    n_actions = int(env.unwrapped.action_space.n)
+    template_one_hot = torch.zeros(n_actions, device=device)
     template_one_hot[selected_idx] = 1
     template_one_hot = template_one_hot.unsqueeze(0)
 

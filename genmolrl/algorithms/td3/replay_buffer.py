@@ -22,12 +22,22 @@ class ReplayBuffer:
         self.next_state_tensors = torch.zeros((capacity, state_dim), device=self.device)
         self.not_dones = torch.zeros((capacity, 1), device=self.device)
 
+    def _fit_vector(self, value, target_dim: int) -> torch.Tensor:
+        vector = torch.as_tensor(value, dtype=torch.float32, device=self.device).reshape(-1)
+        if vector.numel() == target_dim:
+            return vector
+        if vector.numel() < target_dim:
+            out = torch.zeros(target_dim, dtype=torch.float32, device=self.device)
+            out[: vector.numel()] = vector
+            return out
+        return vector[:target_dim]
+
     def add(self, state_smiles, state_obs, template, r2_vector, reward, next_state_smiles, next_state_obs, done):
         idx = self.index
         self.state_smiles[idx] = state_smiles
         self.state_tensors[idx] = torch.as_tensor(state_obs, dtype=torch.float32, device=self.device)
-        self.templates[idx] = torch.as_tensor(template, dtype=torch.float32, device=self.device).reshape(-1)
-        self.r2_vectors[idx] = torch.as_tensor(r2_vector, dtype=torch.float32, device=self.device).reshape(-1)
+        self.templates[idx] = self._fit_vector(template, self.templates.shape[1])
+        self.r2_vectors[idx] = self._fit_vector(r2_vector, self.r2_vectors.shape[1])
         self.rewards[idx] = torch.as_tensor([reward], dtype=torch.float32, device=self.device)
         self.next_state_smiles[idx] = next_state_smiles
         self.next_state_tensors[idx] = torch.as_tensor(next_state_obs, dtype=torch.float32, device=self.device)

@@ -69,9 +69,23 @@ class TD3Agent:
         self.critic_loss = None
 
     def _template_mask_info(self, smiles_batch):
-        template_types = self.env.unwrapped.reaction_manager.template_types.to(device)
-        masks = [self.env.unwrapped.reaction_manager.get_feasible_mask(smile) for smile in smiles_batch]
-        return torch.stack(masks).to(device), template_types
+        rm = self.env.unwrapped.reaction_manager
+        mask_kind = getattr(self.env.unwrapped.mask_provider, "mode", "r2_available")
+        template_types = rm.template_types.to(device)
+        masks = [rm.get_mask(smile, kind=mask_kind) for smile in smiles_batch]
+        mask_tensor = torch.stack(masks).to(device)
+
+        extra = self.template_dim - int(mask_tensor.shape[-1])
+        if extra < 0:
+            raise ValueError(
+                f"TD3 policy template_dim={self.template_dim} is smaller than mask size={mask_tensor.shape[-1]}"
+            )
+        if extra:
+            # Extra action slots are Stop/no-op slots. They are legal for Stop-enabled envs
+            # and have template type 0 so the R2 head stays inactive.
+            mask_tensor = torch.cat([mask_tensor, torch.ones(mask_tensor.shape[0], extra, device=device)], dim=-1)
+            template_types = torch.cat([template_types, torch.zeros(extra, dtype=template_types.dtype, device=device)])
+        return mask_tensor, template_types
 
     def get_action(self, state, evaluate=False):
         state = torch.as_tensor(state.reshape(1, -1), dtype=torch.float32, device=device)
