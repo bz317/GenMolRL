@@ -28,7 +28,7 @@ def _existing_unimolecular_layout(target_dir: str | Path) -> dict[str, str | int
         "test_file": str(test_p),
         "templates_file": str(template_p),
         "eval_start_smiles_file": str(starts_p) if starts_p.is_file() else "",
-        "n_eval_episodes": len(load_pickle(test_p)),
+        "n_test_molecules": len(load_pickle(test_p)),
     }
 
 

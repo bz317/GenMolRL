@@ -132,7 +132,7 @@ data/Uni/reactants_full.pkl
 data/Uni/eval_start_smiles.txt
 ```
 
-`reactants_train.pkl` is used for training, `reactants_test.pkl` is used for testing/search, and `eval_start_smiles.txt` contains the test SMILES for deterministic evaluation starts. `reactants_full.pkl` is still staged as a convenience merged pool, but it is not used by the current default configs.
+`reactants_train.pkl` is used for training, and `reactants_test.pkl` is used for testing/search and full test-set evaluation. Evaluation cycles through every molecule in `reactants_test.pkl` directly. `reactants_full.pkl` and `eval_start_smiles.txt` are staged as compatibility files, but they are not used by the current default configs.
 
 The future Bi dataset should live under the `GenMolRL/` project root at:
 
@@ -439,7 +439,11 @@ This matches current PPO/A2C/TD3 training behavior.
 
 Episodes cycle through a SMILES file deterministically.
 
-This matches current evaluation behavior, where `eval_start_smiles.txt` contains test molecules and evaluation cycles through them.
+### `cycle_pool`
+
+Episodes cycle through every molecule in the loaded reactant pool deterministically.
+
+This matches current evaluation behavior: the eval environment loads `dataset.test_file`, resets the cycle to the first molecule at each evaluation pass, and runs one episode for every test molecule.
 
 ### `fixed`
 

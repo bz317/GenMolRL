@@ -9,9 +9,8 @@ dataset:
   training_file: path # PPO/A2C/TD3 only
   test_file: path
   templates_file: path
-  start_strategy: random_pool # random_pool | cycle_file | fixed | learned_policy
+  start_strategy: random_pool # random_pool | cycle_pool | cycle_file | fixed | learned_policy
   start_smiles_file: null
-  start_smiles_file_eval: null
   fixed_start_smiles: null
 env:
   algorithm_family: sb3_discrete # sb3_discrete | sb3_multidiscrete | td3_pgfs
@@ -25,6 +24,8 @@ env:
 training:
   seed: 42
   total_timesteps: 1000000
+  start_timesteps: 10000
+  eval_freq: 10000
   n_envs: 1
 search:
   max_paths: null

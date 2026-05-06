@@ -15,7 +15,7 @@ def train(config: dict, experiment_name: str):
     config = dict(config)
     config["algorithm"] = "PPO"
     run = init_wandb(config, "PPO", experiment_name)
-    train_env, _eval_env = make_envs(config, seed)
+    train_env, eval_env = make_envs(config, seed)
 
     ppo_cfg = config["ppo"]
     cls = MaskablePPO if config["masking"] != "none" else PPO
@@ -38,7 +38,7 @@ def train(config: dict, experiment_name: str):
     )
     model.learn(
         total_timesteps=int(config["training"].get("total_timesteps", 1_000_000)),
-        callback=sb3_callbacks(config, run.id),
+        callback=sb3_callbacks(config, run.id, eval_env),
         progress_bar=bool(ppo_cfg.get("progress_bar", False)),
     )
     model.save(str(wandb.run.dir + "/final_model"))

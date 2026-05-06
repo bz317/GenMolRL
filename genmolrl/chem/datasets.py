@@ -58,5 +58,5 @@ def stage_unimolecular_split(source_dir: str | Path, target_dir: str | Path) -> 
         "test_file": str(test_p),
         "templates_file": str(template_p),
         "eval_start_smiles_file": str(starts_p),
-        "n_eval_episodes": len(test),
+        "n_test_molecules": len(test),
     }

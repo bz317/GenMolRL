@@ -46,6 +46,76 @@ def _has_real_action(env, smiles: str | None) -> bool:
     return bool(env.unwrapped.reaction_manager.feasible_first_reactant_templates(smiles, kind=mask_kind))
 
 
+def _num_eval_episodes(eval_env) -> int:
+    if hasattr(eval_env.unwrapped.start_strategy, "num_starts"):
+        return int(eval_env.unwrapped.start_strategy.num_starts())
+    return int(len(eval_env.unwrapped.reactant_keys))
+
+
+def _reset_eval_cycle(eval_env) -> None:
+    if hasattr(eval_env.unwrapped.start_strategy, "reset_cycle"):
+        eval_env.unwrapped.start_strategy.reset_cycle()
+
+
+def _evaluate_td3(agent, eval_env, *, seed: int, eval_count: int, steps_done: int) -> None:
+    previous_env = agent.env
+    agent.env = eval_env
+    episode_rewards: list[float] = []
+    episode_lengths: list[int] = []
+    episode_final_qeds: list[float] = []
+    episode_max_qeds: list[float] = []
+    try:
+        _reset_eval_cycle(eval_env)
+        n_eval_episodes = _num_eval_episodes(eval_env)
+        for episode_idx in range(1, n_eval_episodes + 1):
+            state, info = eval_env.reset(seed=seed + 1_000_000 + eval_count * 10_000 + episode_idx)
+            done = False
+            episode_reward = 0.0
+            episode_len = 0
+            max_qed = float(info.get("QED", 0.0))
+            final_qed = max_qed
+            while not done:
+                if not _has_real_action(eval_env, info.get("SMILES")) and not eval_env.unwrapped.use_stop_action:
+                    break
+                eval_env.enable()
+                action = agent.get_action(state, evaluate=True)
+                state, reward, terminated, truncated, info = eval_env.step(action)
+                done = bool(terminated or truncated)
+                episode_reward += float(reward)
+                episode_len += 1
+                final_qed = float(info.get("QED", 0.0))
+                max_qed = max(max_qed, final_qed)
+            episode_rewards.append(episode_reward)
+            episode_lengths.append(episode_len)
+            episode_final_qeds.append(final_qed)
+            episode_max_qeds.append(max_qed)
+            wandb.log(
+                {
+                    "train/global_step": steps_done,
+                    "eval/episode": episode_idx,
+                    "eval/total_reward_each_episode": episode_reward,
+                    "eval/source_train_global_step": steps_done,
+                },
+                step=steps_done,
+            )
+        wandb.log(
+            {
+                "train/global_step": steps_done,
+                "eval/mean_reward": float(np.mean(episode_rewards)) if episode_rewards else 0.0,
+                "eval/std_reward": float(np.std(episode_rewards)) if episode_rewards else 0.0,
+                "eval/mean_ep_length": float(np.mean(episode_lengths)) if episode_lengths else 0.0,
+                "eval/mean_final_qed": float(np.mean(episode_final_qeds)) if episode_final_qeds else 0.0,
+                "eval/max_qed": float(np.max(episode_max_qeds)) if episode_max_qeds else 0.0,
+                "eval/max_episode_qed": float(np.max(episode_max_qeds)) if episode_max_qeds else 0.0,
+                "eval/n_molecules": n_eval_episodes,
+                "eval_count": eval_count,
+            },
+            step=steps_done,
+        )
+    finally:
+        agent.env = previous_env
+
+
 def train(config: dict, experiment_name: str):
     seed = int(config["training"].get("seed", 42))
     set_seed(seed)
@@ -56,6 +126,7 @@ def train(config: dict, experiment_name: str):
     define_ppo_compatible_metrics()
 
     env = _make_td3_env(config, eval_env=False)
+    eval_env = _make_td3_env(config, eval_env=True)
     td3_cfg = config["td3"]
     train_cfg = config["training"]
     agent = TD3Agent(
@@ -84,6 +155,7 @@ def train(config: dict, experiment_name: str):
     start_timesteps = int(train_cfg.get("start_timesteps", 10000))
     batch_size = int(td3_cfg.get("batch_size", 64))
     save_freq = int(config["callbacks"].get("model_save_freq", 5000))
+    eval_freq = int(train_cfg.get("eval_freq", 10000))
     checkpoint_dir = project_root() / "runs" / run.id / "td3_checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -92,6 +164,7 @@ def train(config: dict, experiment_name: str):
     completed_rewards: list[float] = []
     cumulative_reward = 0.0
     overall_max_qed = 0.0
+    eval_count = 0
     while steps_done < max_timesteps:
         episode_count += 1
         state, info = env.reset(seed=seed + episode_count)
@@ -145,6 +218,15 @@ def train(config: dict, experiment_name: str):
                 metrics = agent.train(replay_buffer, batch_size)
                 metrics.update({"train/global_step": steps_done, "steps_done": steps_done})
                 wandb.log(metrics, step=steps_done)
+            if eval_freq > 0 and steps_done >= start_timesteps and steps_done % eval_freq == 0:
+                eval_count += 1
+                _evaluate_td3(
+                    agent,
+                    eval_env,
+                    seed=seed,
+                    eval_count=eval_count,
+                    steps_done=steps_done,
+                )
             if steps_done % save_freq == 0:
                 agent.save_model(str(checkpoint_dir / f"checkpoint_{steps_done}.tar"), steps_done, episode_count, replay_buffer)
         completed_rewards.append(episode_reward)

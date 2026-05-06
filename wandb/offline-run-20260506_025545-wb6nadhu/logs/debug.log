@@ -1,0 +1,23 @@
+2026-05-06 02:55:45,357 INFO    MainThread:451264 [wandb_setup.py:_flush():81] Current SDK version is 0.25.1
+2026-05-06 02:55:45,357 INFO    MainThread:451264 [wandb_setup.py:_flush():81] Configure stats pid to 451264
+2026-05-06 02:55:45,357 INFO    MainThread:451264 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2026-05-06 02:55:45,357 INFO    MainThread:451264 [wandb_init.py:setup_run_log_directory():717] Logging user logs to /home/bz317/new_mol_with_RL_GNN/GenMolRL/wandb/offline-run-20260506_025545-wb6nadhu/logs/debug.log
+2026-05-06 02:55:45,358 INFO    MainThread:451264 [wandb_init.py:setup_run_log_directory():718] Logging internal logs to /home/bz317/new_mol_with_RL_GNN/GenMolRL/wandb/offline-run-20260506_025545-wb6nadhu/logs/debug-internal.log
+2026-05-06 02:55:45,358 INFO    MainThread:451264 [wandb_init.py:init():844] calling init triggers
+2026-05-06 02:55:45,359 INFO    MainThread:451264 [wandb_init.py:init():849] wandb.init called with sweep_config: {}
+config: {'project': 'GenMolRL', 'experiment_name': 'TD3_logging_capture_smoke', 'reaction_mode': 'uni', 'masking': 'r2_available', 'reward': 'delta_qed', 'max_episode_len': 5, 'dataset': {'training_file': 'data/Uni/reactants_train.pkl', 'test_file': 'data/Uni/reactants_test.pkl', 'templates_file': 'data/Uni/templates_unimolecolar_explicit.pkl', 'start_strategy': 'random_pool', 'start_smiles_file_eval': 'data/Uni/eval_start_smiles.txt'}, 'env': {'algorithm_family': 'td3_pgfs', 'action_design': 'pgfs_continuous_r2', 'use_stop_action': False, 'invalid_reaction_penalty': -1.0}, 'training': {'seed': 42, 'total_timesteps': 2, 'start_timesteps': 1, 'eval_freq': 1, 'n_eval_episodes': 2, 'n_envs': 1}, 'td3': {'actor_lr': 0.0001, 'critic_lr': 0.0003, 'gamma': 0.99, 'tau': 0.005, 'batch_size': 1, 'buffer_size': 32, 'policy_freq': 2, 'policy_noise': 0.2, 'noise_std': 0.1, 'noise_clip': 0.2, 'initial_temperature': 1.0, 'min_temperature': 0.25}, 'callbacks': {'model_save_freq': 1000000, 'gradient_save_freq': 100}, 'algorithm': 'TD3', '_wandb': {}}
+2026-05-06 02:55:45,359 INFO    MainThread:451264 [wandb_init.py:init():892] starting backend
+2026-05-06 02:55:45,579 INFO    MainThread:451264 [wandb_init.py:init():895] sending inform_init request
+2026-05-06 02:55:45,585 INFO    MainThread:451264 [wandb_init.py:init():903] backend started and connected
+2026-05-06 02:55:45,587 INFO    MainThread:451264 [wandb_init.py:init():973] updated telemetry
+2026-05-06 02:55:45,599 INFO    MainThread:451264 [wandb_init.py:init():997] communicating run to backend with 90.0 second timeout
+2026-05-06 02:55:45,703 INFO    MainThread:451264 [wandb_init.py:init():1042] starting run threads in backend
+2026-05-06 02:55:45,923 INFO    MainThread:451264 [wandb_run.py:_console_start():2524] atexit reg
+2026-05-06 02:55:45,923 INFO    MainThread:451264 [wandb_run.py:_redirect():2373] redirect: wrap_raw
+2026-05-06 02:55:45,923 INFO    MainThread:451264 [wandb_run.py:_redirect():2442] Wrapping output streams.
+2026-05-06 02:55:45,923 INFO    MainThread:451264 [wandb_run.py:_redirect():2465] Redirects installed.
+2026-05-06 02:55:45,926 INFO    MainThread:451264 [wandb_init.py:init():1082] run started, returning control to user process
+2026-05-06 02:55:50,483 INFO    MainThread:451264 [wandb_run.py:_finish():2291] finishing run GenMolRL/wb6nadhu
+2026-05-06 02:55:50,484 INFO    MainThread:451264 [wandb_run.py:_atexit_cleanup():2490] got exitcode: 0
+2026-05-06 02:55:50,484 INFO    MainThread:451264 [wandb_run.py:_restore():2472] restore
+2026-05-06 02:55:50,485 INFO    MainThread:451264 [wandb_run.py:_restore():2478] restore done

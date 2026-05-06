@@ -14,7 +14,7 @@ from wandb.integration.sb3 import WandbCallback
 
 import wandb
 from genmolrl.config import project_root, resolve_path
-from genmolrl.logging.callbacks import EpisodeWandbCallback
+from genmolrl.logging.callbacks import EpisodeWandbCallback, EvaluationWandbCallback
 from genmolrl.logging.wandb_metrics import define_ppo_compatible_metrics
 from genmolrl.registry import ENV_ID, register_envs
 
@@ -76,9 +76,8 @@ def env_kwargs(config: dict, *, eval_env: bool = False) -> dict:
         "render_mode": "human" if eval_env else None,
         "append_action_mask_to_obs": env_cfg.get("append_action_mask_to_obs"),
     }
-    if eval_env and dataset.get("start_smiles_file_eval"):
-        kwargs["start_strategy"] = "cycle_file"
-        kwargs["start_smiles_file"] = resolve_path(dataset["start_smiles_file_eval"])
+    if eval_env:
+        kwargs["start_strategy"] = "cycle_pool"
     elif dataset.get("fixed_start_smiles"):
         kwargs["start_strategy"] = "fixed"
         kwargs["fixed_start_smiles"] = dataset["fixed_start_smiles"]
@@ -108,24 +107,30 @@ def make_envs(config: dict, seed: int):
     return train_env, eval_env
 
 
-def sb3_callbacks(config: dict, run_id: str):
+def sb3_callbacks(config: dict, run_id: str, eval_env=None):
     paths = run_dir(run_id)
     ckpt_dir = paths / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    return CallbackList(
-        [
-            WandbCallback(
-                model_save_path=str(paths / "wandb_model"),
-                model_save_freq=int(config["callbacks"].get("model_save_freq", 5000)),
-                gradient_save_freq=int(config["callbacks"].get("gradient_save_freq", 100)),
-                log="all",
-                verbose=1,
-            ),
-            CheckpointCallback(
-                save_freq=int(config["callbacks"].get("model_save_freq", 5000)),
-                save_path=str(ckpt_dir),
-                name_prefix=config.get("algorithm", "model").lower(),
-            ),
-            EpisodeWandbCallback(),
-        ]
-    )
+    callbacks = [
+        WandbCallback(
+            model_save_path=str(paths / "wandb_model"),
+            model_save_freq=int(config["callbacks"].get("model_save_freq", 5000)),
+            gradient_save_freq=int(config["callbacks"].get("gradient_save_freq", 100)),
+            log="all",
+            verbose=1,
+        ),
+        CheckpointCallback(
+            save_freq=int(config["callbacks"].get("model_save_freq", 5000)),
+            save_path=str(ckpt_dir),
+            name_prefix=config.get("algorithm", "model").lower(),
+        ),
+        EpisodeWandbCallback(),
+    ]
+    if eval_env is not None:
+        callbacks.append(
+            EvaluationWandbCallback(
+                eval_env,
+                eval_freq=int(config["training"].get("eval_freq", 10000)),
+            )
+        )
+    return CallbackList(callbacks)

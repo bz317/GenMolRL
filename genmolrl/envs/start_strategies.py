@@ -22,7 +22,7 @@ def load_start_file(path: str | None, reactants: dict) -> list[str]:
 
 class StartStrategy:
     def __init__(self, strategy: str = "random_pool", fixed_start_smiles: str | None = None, start_smiles_file: str | None = None):
-        if strategy not in {"random_pool", "cycle_file", "fixed", "learned_policy"}:
+        if strategy not in {"random_pool", "cycle_pool", "cycle_file", "fixed", "learned_policy"}:
             raise ValueError(f"Unsupported start_strategy: {strategy}")
         self.strategy = strategy
         self.fixed_start_smiles = fixed_start_smiles
@@ -42,12 +42,18 @@ class StartStrategy:
         else:
             self._starts = list(reactants.keys())
 
+    def reset_cycle(self) -> None:
+        self._cycle_idx = 0
+
+    def num_starts(self) -> int:
+        return len(self._starts)
+
     def sample(self, env) -> str:
         if self.strategy == "learned_policy":
             raise NotImplementedError("learned_policy is reserved for SynFlowNet-style adapters.")
-        if self.strategy in {"fixed", "cycle_file"}:
+        if self.strategy in {"fixed", "cycle_pool", "cycle_file"}:
             smiles = self._starts[self._cycle_idx % len(self._starts)]
-            if self.strategy == "cycle_file":
+            if self.strategy in {"cycle_pool", "cycle_file"}:
                 self._cycle_idx += 1
             return smiles
         return str(env.np_random.choice(self._starts))
