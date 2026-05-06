@@ -4,8 +4,8 @@
 
 The generated plot has a no-action column plus up to five reaction columns.
 Column `N` shows the QED distribution of final molecules from trajectories that
-ended after exactly `N` reactions. Reaction columns contain three boxplots:
-exhaustive, greedy, and random.
+ended after exactly `N` reactions. Reaction columns contain boxplots for
+exhaustive, greedy, random, PPO, and A2C.
 
 The no-action column contains exhaustive-search starts whose original molecule
 has QED greater than or equal to every reachable action point. Greedy and random
@@ -25,6 +25,18 @@ to the no-action column.
 Greedy and random search currently save only one final trajectory per start
 molecule, so their step column contains starts whose single trajectory ended
 after exactly that many reactions.
+
+PPO and A2C are evaluated by loading the saved SB3 models and rolling them out
+once over the test set with deterministic actions. The default model paths are:
+
+- PPO: `runs/3zd846ff/wandb_model/model.zip`
+- A2C: `runs/en3i9xg8/wandb_model/model.zip`
+
+Their evaluated trajectories are cached so rerunning the plot does not need to
+reload the models and re-evaluate all test molecules every time:
+
+- `ppo_3zd846ff_eval_trajectories.csv`
+- `a2c_en3i9xg8_eval_trajectories.csv`
 
 Outputs:
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from pathlib import Path
 from statistics import median
 
@@ -21,11 +22,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-METHODS = ("Exhaustive", "Greedy", "Random")
+METHODS = ("Exhaustive", "Greedy", "Random", "PPO", "A2C")
 COLORS = {
     "Exhaustive": "#4C78A8",
     "Greedy": "#F58518",
     "Random": "#54A24B",
+    "PPO": "#B279A2",
+    "A2C": "#E45756",
 }
 
 
@@ -129,6 +132,98 @@ def parse_trajectory_finals(path: Path, max_step: int) -> dict[int, list[float]]
     return values
 
 
+def parse_cached_policy_eval(path: Path, max_step: int) -> dict[int, list[float]] | None:
+    if not path.is_file():
+        return None
+    values = {step: [] for step in range(0, max_step + 1)}
+    with path.open("r", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            try:
+                step = int(row["num_reactions"])
+                qed = float(row["final_qed"])
+            except (KeyError, ValueError):
+                continue
+            if 0 <= step <= max_step:
+                values[step].append(qed)
+    return values
+
+
+def evaluate_sb3_policy(
+    *,
+    repo_root: Path,
+    method: str,
+    model_path: Path,
+    config_path: Path,
+    cache_path: Path,
+    max_step: int,
+) -> dict[int, list[float]]:
+    cached = parse_cached_policy_eval(cache_path, max_step)
+    if cached is not None:
+        return cached
+
+    sys.path.insert(0, str(repo_root))
+    from genmolrl.algorithms.common import env_kwargs
+    from genmolrl.config import load_config
+    from genmolrl.envs.molecule_design_env import MoleculeDesignEnv
+
+    config = load_config(config_path)
+    config["algorithm"] = method
+    env = MoleculeDesignEnv(**env_kwargs(config, eval_env=True))
+    env.start_strategy.reset_cycle()
+    n_eval = env.start_strategy.num_starts()
+
+    if method == "PPO":
+        from sb3_contrib import MaskablePPO
+
+        model = MaskablePPO.load(model_path, device="cpu")
+    elif method == "A2C":
+        from stable_baselines3 import A2C
+
+        # Import registers the custom policy class needed to unpickle the model.
+        import genmolrl.algorithms.a2c.policies  # noqa: F401
+
+        model = A2C.load(model_path, device="cpu")
+    else:
+        raise ValueError(f"Unsupported SB3 method: {method}")
+
+    values = {step: [] for step in range(0, max_step + 1)}
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with cache_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["method", "episode", "start_smiles", "final_smiles", "initial_qed", "final_qed", "num_reactions"])
+        for episode in range(n_eval):
+            obs, info = env.reset()
+            start_smiles = str(info["SMILES"])
+            initial_qed = float(info["QED"])
+            final_smiles = start_smiles
+            final_qed = initial_qed
+            num_reactions = 0
+            done = False
+
+            while not done:
+                if method == "PPO":
+                    action, _ = model.predict(obs, deterministic=True, action_masks=env.action_masks())
+                else:
+                    action, _ = model.predict(obs, deterministic=True)
+                obs, _reward, terminated, truncated, info = env.step(action)
+                done = bool(terminated or truncated)
+                if info.get("stop") or info.get("reaction_failed") or info.get("bad_template_index") is not None:
+                    final_smiles = str(info.get("SMILES") or final_smiles)
+                    final_qed = float(info.get("QED", final_qed))
+                    break
+                num_reactions = int(info.get("step", num_reactions))
+                final_smiles = str(info["SMILES"])
+                final_qed = float(info["QED"])
+
+            if 0 <= num_reactions <= max_step:
+                values[num_reactions].append(final_qed)
+            writer.writerow([method, episode, start_smiles, final_smiles, initial_qed, final_qed, num_reactions])
+
+    env.close()
+    return values
+
+
 def quantile(values: list[float], q: float) -> float:
     ordered = sorted(values)
     return ordered[round((len(ordered) - 1) * q)]
@@ -186,12 +281,9 @@ def plot_boxplots(
             if grouped_values[method][step]
         ]
         data = [values for _, values in present]
-        if len(present) == 1:
-            positions = [1.0]
-        elif len(present) == 2:
-            positions = [0.93, 1.07]
-        else:
-            positions = [0.86, 1.0, 1.14]
+        all_positions = [0.72, 0.86, 1.0, 1.14, 1.28]
+        position_by_method = dict(zip(METHODS, all_positions))
+        positions = [position_by_method[method] for method, _ in present]
         box = axis.boxplot(
             data,
             positions=positions,
@@ -212,12 +304,14 @@ def plot_boxplots(
         else:
             axis.set_title(f"After {step} reaction{'s' if step > 1 else ''}")
         axis.set_xlabel("Method")
-        axis.set_xlim(0.76, 1.24)
-        axis.set_xticks(positions)
-        axis.set_xticklabels([method for method, _ in present])
+        axis.set_xlim(0.62, 1.38)
+        axis.set_xticks(all_positions)
+        axis.set_xticklabels(METHODS)
         axis.tick_params(axis="x", rotation=30)
         axis.grid(axis="y", alpha=0.25)
-        for idx, values in zip(positions, data):
+        for method in METHODS:
+            idx = position_by_method[method]
+            values = grouped_values[method][step]
             axis.text(
                 idx,
                 0.02,
@@ -255,6 +349,36 @@ def main() -> None:
         type=Path,
         default=repo_root / "runs/random_search_uni_results.txt",
     )
+    parser.add_argument(
+        "--ppo-model",
+        type=Path,
+        default=repo_root / "runs/3zd846ff/wandb_model/model.zip",
+    )
+    parser.add_argument(
+        "--a2c-model",
+        type=Path,
+        default=repo_root / "runs/en3i9xg8/wandb_model/model.zip",
+    )
+    parser.add_argument(
+        "--ppo-config",
+        type=Path,
+        default=repo_root / "configs/ppo_uni_masked_delta_qed.yaml",
+    )
+    parser.add_argument(
+        "--a2c-config",
+        type=Path,
+        default=repo_root / "configs/a2c_uni_masked_delta_qed.yaml",
+    )
+    parser.add_argument(
+        "--ppo-cache",
+        type=Path,
+        default=repo_root / "visualization/ppo_3zd846ff_eval_trajectories.csv",
+    )
+    parser.add_argument(
+        "--a2c-cache",
+        type=Path,
+        default=repo_root / "visualization/a2c_en3i9xg8_eval_trajectories.csv",
+    )
     parser.add_argument("--max-step", type=int, default=5)
     parser.add_argument(
         "--output",
@@ -284,6 +408,22 @@ def main() -> None:
         "Exhaustive": exhaustive_values,
         "Greedy": parse_trajectory_finals(args.greedy, args.max_step),
         "Random": parse_trajectory_finals(args.random, args.max_step),
+        "PPO": evaluate_sb3_policy(
+            repo_root=repo_root,
+            method="PPO",
+            model_path=args.ppo_model,
+            config_path=args.ppo_config,
+            cache_path=args.ppo_cache,
+            max_step=args.max_step,
+        ),
+        "A2C": evaluate_sb3_policy(
+            repo_root=repo_root,
+            method="A2C",
+            model_path=args.a2c_model,
+            config_path=args.a2c_config,
+            cache_path=args.a2c_cache,
+            max_step=args.max_step,
+        ),
     }
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
