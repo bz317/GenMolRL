@@ -80,6 +80,7 @@ class MoleculeDesignEnv(gym.Env):
             reward,
             invalid_penalty=invalid_reaction_penalty,
             round_digits=reward_round_digits,
+            qed_round_digits=info_qed_round_digits,
         )
         self.info_qed_round_digits = info_qed_round_digits
         self.start_strategy = StartStrategy(start_strategy, fixed_start_smiles, start_smiles_file)
@@ -172,7 +173,7 @@ class MoleculeDesignEnv(gym.Env):
             )
             info = self._get_info()
             info.update({"stop": True, "stop_reward": reward})
-            return self._get_obs(), reward, False, True, info
+            return np.zeros(self.observation_space.shape[0], dtype=np.float32), reward, False, True, info
 
         template = self.templates.get(template_index)
         if template is None:
