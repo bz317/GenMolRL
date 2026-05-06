@@ -11,7 +11,7 @@ import wandb
 from genmolrl.algorithms.common import env_kwargs, init_wandb, set_seed
 from genmolrl.algorithms.td3.agent import TD3Agent
 from genmolrl.algorithms.td3.knn import KNNWrapper
-from genmolrl.algorithms.td3.random_selector import select_random_action
+from genmolrl.algorithms.td3.random_selector import NoValidActionError, select_random_action
 from genmolrl.algorithms.td3.replay_buffer import ReplayBuffer
 from genmolrl.config import project_root
 from genmolrl.logging.wandb_metrics import define_ppo_compatible_metrics
@@ -37,6 +37,13 @@ def _to_r2_tensor(env, r2):
     if r2 is None:
         return torch.zeros((1, env.unwrapped.observation_space.shape[0]), device=device)
     return torch.tensor(env.unwrapped.reactants[r2], dtype=torch.float32, device=device).unsqueeze(0)
+
+
+def _has_real_action(env, smiles: str | None) -> bool:
+    if not smiles:
+        return False
+    mask_kind = getattr(env.unwrapped.mask_provider, "mode", "r2_available")
+    return bool(env.unwrapped.reaction_manager.feasible_first_reactant_templates(smiles, kind=mask_kind))
 
 
 def train(config: dict, experiment_name: str):
@@ -93,11 +100,18 @@ def train(config: dict, experiment_name: str):
         episode_len = 0
         max_qed = 0.0
         while not done and steps_done < max_timesteps:
+            if not _has_real_action(env, info.get("SMILES")) and not env.unwrapped.use_stop_action:
+                break
             steps_done += 1
             episode_len += 1
             if steps_done < start_timesteps:
                 env.disable()
-                action = select_random_action(env, info["SMILES"])
+                try:
+                    action = select_random_action(env, info["SMILES"])
+                except NoValidActionError:
+                    steps_done -= 1
+                    episode_len -= 1
+                    break
             else:
                 env.enable()
                 action = agent.get_action(state)
