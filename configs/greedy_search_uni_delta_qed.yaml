@@ -10,13 +10,16 @@ dataset:
 env:
   invalid_reaction_penalty: -1.0
   reward_round_digits: 3
+  info_qed_round_digits: 3
 training:
   seed: 42
 search:
-  max_paths: 100
-  max_attempts: 1000
-  max_reactions: 10000
+  max_paths: null
+  max_attempts: null
+  max_reactions: null
+  max_starts: null
   max_r2_per_template: 100
+  greedy_mode: best_action
   results_file: runs/greedy_search_uni_results.txt
   overwrite_results: true
   use_wandb: true

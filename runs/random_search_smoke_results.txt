@@ -1,0 +1,32 @@
+# GenMolRL search results
+
+[summary]
+attempts: 3
+saved_paths: 3
+total_reactions: 4
+max_qed: 0.9074846667438209
+best_qed: 0.9074846667438209
+avg_delta_qed: -0.14561066666666667
+mean_delta_qed: -0.14561066666666667
+sum_delta_qed: -0.436832
+num_start_molecules: 3
+avg_num_reactions: 1.3333333333333333
+max_episode_len: 5
+results_file: runs/random_search_smoke_results.txt
+starts_seen: 3
+
+[trajectories]
+path_id	start_smiles	final_smiles	initial_qed	final_qed	max_qed	delta_qed	num_reactions
+0	N#CCc1ccc(Oc2ccc(C(=O)O)cc2)cc1	O=C(O)c1ccc(Oc2ccc(Cc3nn[nH]n3)cc2)cc1	0.907485	0.748707	0.907	-0.158778	1
+1	OCc1cc(Br)cc2c1OCC2	N#Cc1cc(C#N)c2c(c1)CCO2	0.796056	0.590332	0.796	-0.205724	2
+2	O=C(NC(C(=O)O)c1ccc(OCC(F)F)cc1)OCC1c2ccccc2-c2ccccc21	O=C(NC(C(=O)Cl)c1ccc(OCC(F)F)cc1)OCC1c2ccccc2-c2ccccc21	0.501789	0.429458	0.502	-0.07233	1
+
+[steps]
+path_id	step	reactant	template	product	qed	reward	second_reactant
+0	0	N#CCc1ccc(Oc2ccc(C(=O)O)cc2)cc1	START	N#CCc1ccc(Oc2ccc(C(=O)O)cc2)cc1	0.907	0.0	
+0	1	N#CCc1ccc(Oc2ccc(C(=O)O)cc2)cc1	Tetrazol_formation	O=C(O)c1ccc(Oc2ccc(Cc3nn[nH]n3)cc2)cc1	0.749	-0.158	
+1	0	OCc1cc(Br)cc2c1OCC2	START	OCc1cc(Br)cc2c1OCC2	0.796	0.0	
+1	1	OCc1cc(Br)cc2c1OCC2	FGI_nitrilation	N#Cc1cc(Br)cc2c1OCC2	0.677	-0.119	
+1	2	N#Cc1cc(Br)cc2c1OCC2	FGI_Rosenmund-von_Braun	N#Cc1cc(C#N)c2c(c1)CCO2	0.59	-0.087	
+2	0	O=C(NC(C(=O)O)c1ccc(OCC(F)F)cc1)OCC1c2ccccc2-c2ccccc21	START	O=C(NC(C(=O)O)c1ccc(OCC(F)F)cc1)OCC1c2ccccc2-c2ccccc21	0.502	0.0	
+2	1	O=C(NC(C(=O)O)c1ccc(OCC(F)F)cc1)OCC1c2ccccc2-c2ccccc21	FGI_Acyl_chloride	O=C(NC(C(=O)Cl)c1ccc(OCC(F)F)cc1)OCC1c2ccccc2-c2ccccc21	0.429	-0.073	

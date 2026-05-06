@@ -41,6 +41,11 @@ def main() -> None:
     parser.add_argument("--training-file", help="Override dataset.training_file from the config")
     parser.add_argument("--test-file", help="Override dataset.test_file from the config")
     parser.add_argument("--templates-file", help="Override dataset.templates_file from the config")
+    parser.add_argument(
+        "--greedy-mode",
+        choices=["best_action", "positive_delta_only"],
+        help="Override search.greedy_mode for greedy_search",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -63,6 +68,8 @@ def main() -> None:
         for key, value in dataset_overrides.items():
             if value is not None:
                 config["dataset"][key] = value
+    if args.greedy_mode is not None:
+        config.setdefault("search", {})["greedy_mode"] = args.greedy_mode
 
     experiment_name = args.experiment_name or config.get(
         "experiment_name",

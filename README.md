@@ -204,21 +204,21 @@ TEMPLATE_FILE=data/Uni/templates_unimolecolar_explicit.pkl \
 
 ### Random Search
 
-`random_search` is a non-neural baseline. At each step:
+`random_search` is a non-neural baseline. It goes through `dataset.test_file` one molecule at a time, matching evaluation order. For each test start molecule, at each step:
 
-1. Select a random starting molecule from the configured reactant pool.
-2. Build the valid template list using the configured masking mode.
-3. Randomly choose one valid template.
-4. If the template is bimolecular, randomly choose one valid R2 from the reactant pool.
-5. Apply the reaction and continue from the product if valid.
+1. Build the valid template list using the configured masking mode.
+2. Randomly choose one valid template.
+3. If the template is bimolecular, randomly choose one valid R2 from the reactant pool.
+4. Apply the reaction and continue from the product if valid.
+5. Stop when no valid action is available or `max_episode_len` is reached.
 
-It writes a `.txt` report containing a summary section plus successful synthesis steps, and logs simple W&B metrics such as saved paths, total reactions, last terminal QED, and best QED.
+It writes a `.txt` report with `[summary]`, `[trajectories]`, and `[steps]` sections. The summary includes `max_qed` over all test starts and generated products, plus `avg_delta_qed`, the average of `final_qed - start_qed` over all test start molecules.
 
-The text report includes a `START` row for each saved path (`step=0`) followed by one row per successful reaction. By default, search result files are overwritten at the start of a run (`overwrite_results: true`) so repeated launches do not mix path IDs from old runs.
+The text report includes a `START` row for every test molecule (`step=0`) followed by one row per successful reaction. If a start molecule has no valid action, it is still saved as a start-only trajectory with `delta_qed = 0`. By default, search result files are overwritten at the start of a run (`overwrite_results: true`) so repeated launches do not mix path IDs from old runs.
 
 ### Greedy Search
 
-`greedy_search` is a non-neural baseline. At each step:
+`greedy_search` is a deterministic non-neural baseline. It also goes through `dataset.test_file` one molecule at a time, matching evaluation order. At each step:
 
 1. Build the valid template list using the configured masking mode.
 2. Enumerate candidate products from valid templates.
@@ -227,6 +227,22 @@ The text report includes a `START` row for each saved path (`step=0`) followed b
 5. Choose the candidate with the best score and continue from that product.
 
 For `reward: delta_qed`, greedy search maximizes QED improvement at each step. For `reward: final_qed`, it maximizes product QED.
+
+Greedy search supports two modes:
+
+```yaml
+search:
+  greedy_mode: best_action          # always take the highest-scoring valid action
+  # greedy_mode: positive_delta_only # for delta_qed, stop if the best action is <= 0
+```
+
+Use the wrapper override:
+
+```bash
+GREEDY_MODE=positive_delta_only ./run_genmolrl_greedy_search.sh
+```
+
+`best_action` may take a negative delta-QED action if every valid action is negative, choosing the least bad one. `positive_delta_only` stops instead, keeping the current molecule as the final molecule.
 
 ### Exhausted Search
 
@@ -242,10 +258,11 @@ Search stopping controls:
 ```yaml
 max_episode_len: 5     # max reaction depth per trajectory, all methods
 search:
-  max_paths: 100      # max saved successful paths
-  max_attempts: 1000  # max attempted starts
-  max_reactions: 10000
-  max_starts: null    # exhausted_search only: max test starts to enumerate
+  max_paths: null      # optional cap on saved trajectories
+  max_attempts: null   # legacy/debug cap; random/greedy default to test-set order
+  max_reactions: null  # optional cap on total reactions
+  max_starts: null     # optional cap on test starts for debug runs
+  greedy_mode: best_action
 ```
 
 These search settings are local to non-neural search and do not affect PPO, A2C, or TD3 configs.

@@ -35,6 +35,7 @@ search:
   max_reactions: null
   max_starts: null
   max_r2_per_template: null
+  greedy_mode: best_action # best_action | positive_delta_only
   results_file: path
   overwrite_results: true
   use_wandb: true

@@ -54,6 +54,7 @@ class SearchRunner:
             config["reward"],
             invalid_penalty=float(config.get("env", {}).get("invalid_reaction_penalty", -1.0)),
             round_digits=config.get("env", {}).get("reward_round_digits"),
+            qed_round_digits=config.get("env", {}).get("info_qed_round_digits"),
         )
         env_cfg = config.get("env", {})
         self.max_steps = int(
@@ -70,6 +71,12 @@ class SearchRunner:
         self.max_reactions = self._optional_int("max_reactions", None if mode == "exhausted_search" else 10000)
         self.max_starts = self._optional_int("max_starts", None)
         self.max_r2_per_template = self._optional_int("max_r2_per_template", None if mode == "exhausted_search" else 100)
+        self.greedy_mode = str(self.search_cfg.get("greedy_mode", "best_action")).lower()
+        if self.greedy_mode not in {"best_action", "positive_delta_only"}:
+            raise ValueError(
+                "search.greedy_mode must be 'best_action' or 'positive_delta_only'. "
+                f"Got: {self.greedy_mode}"
+            )
         self.overwrite_results = bool(self.search_cfg.get("overwrite_results", True))
         self.seed = int(config.get("training", {}).get("seed", 42))
         random.seed(self.seed)
@@ -111,6 +118,7 @@ class SearchRunner:
                 init_kw["entity"] = config["entity"]
             wandb.init(**init_kw)
         self.all_steps: list[SearchStep] = []
+        self.trajectory_summaries: list[dict] = []
 
     def _optional_int(self, key: str, default: int | None) -> int | None:
         value = self.search_cfg.get(key, default)
@@ -166,6 +174,8 @@ class SearchRunner:
         if not candidates:
             return None
         reward, idx, product, r2 = max(candidates, key=lambda x: x[0])
+        if self.mode == "greedy_search" and self.greedy_mode == "positive_delta_only" and reward <= 0:
+            return None
         return idx, product, r2, reward
 
     def _all_next(self, current: str) -> list[tuple[int, str, str | None, float]]:
@@ -191,6 +201,21 @@ class SearchRunner:
             f.write("[summary]\n")
             for key, value in summary.items():
                 f.write(f"{key}: {value}\n")
+            if self.trajectory_summaries:
+                f.write("\n[trajectories]\n")
+                trajectory_fields = [
+                    "path_id",
+                    "start_smiles",
+                    "final_smiles",
+                    "initial_qed",
+                    "final_qed",
+                    "max_qed",
+                    "delta_qed",
+                    "num_reactions",
+                ]
+                f.write("\t".join(trajectory_fields) + "\n")
+                for item in self.trajectory_summaries:
+                    f.write("\t".join(str(item.get(k, "")) for k in trajectory_fields) + "\n")
             f.write("\n[steps]\n")
             f.write("\t".join(fields) + "\n")
             for step in self.all_steps:
@@ -235,13 +260,40 @@ class SearchRunner:
             result_file = str(self.result_file.relative_to(project_root()))
         except ValueError:
             result_file = str(self.result_file)
+        deltas = [float(item["delta_qed"]) for item in self.trajectory_summaries]
+        reaction_counts = [int(item["num_reactions"]) for item in self.trajectory_summaries]
         return {
             "attempts": attempts,
             "saved_paths": saved_paths,
             "total_reactions": total_reactions,
+            "max_qed": best_qed,
             "best_qed": best_qed,
+            "avg_delta_qed": float(np.mean(deltas)) if deltas else 0.0,
+            "mean_delta_qed": float(np.mean(deltas)) if deltas else 0.0,
+            "sum_delta_qed": float(np.sum(deltas)) if deltas else 0.0,
+            "num_start_molecules": len(self.trajectory_summaries),
+            "avg_num_reactions": float(np.mean(reaction_counts)) if reaction_counts else 0.0,
+            "max_episode_len": self.max_steps,
+            "greedy_mode": self.greedy_mode if self.mode == "greedy_search" else "",
             "results_file": result_file,
         }
+
+    def _record_trajectory(self, path_rows: list[SearchStep], initial_qed: float, path_id: int) -> None:
+        final_row = path_rows[-1]
+        final_qed = float(qed(final_row.product))
+        path_max_qed = max(float(row.qed) for row in path_rows)
+        self.trajectory_summaries.append(
+            {
+                "path_id": path_id,
+                "start_smiles": path_rows[0].product,
+                "final_smiles": final_row.product,
+                "initial_qed": round(float(initial_qed), 6),
+                "final_qed": round(final_qed, 6),
+                "max_qed": round(path_max_qed, 6),
+                "delta_qed": round(final_qed - float(initial_qed), 6),
+                "num_reactions": len(path_rows) - 1,
+            }
+        )
 
     def _finish(self, summary: dict) -> dict:
         self._write_report(summary)
@@ -251,17 +303,19 @@ class SearchRunner:
 
     def _run_random_or_greedy(self):
         saved_paths = 0
-        attempts = 0
+        starts_seen = 0
         total_reactions = 0
         best_qed = 0.0
-        while (
-            (self.max_paths is None or saved_paths < self.max_paths)
-            and attempts < self.max_attempts
-            and (self.max_reactions is None or total_reactions < self.max_reactions)
-        ):
-            attempts += 1
-            current = self._sample_start()
+        for current in self.reactant_keys:
+            if self.max_starts is not None and starts_seen >= self.max_starts:
+                break
+            if self._reached_limit(saved_paths, total_reactions):
+                break
+            if not _valid_smiles(current):
+                continue
+            starts_seen += 1
             initial_qed = qed(current)
+            best_qed = max(best_qed, initial_qed)
             path_rows: list[SearchStep] = [
                 SearchStep(
                     path_id=saved_paths,
@@ -298,11 +352,11 @@ class SearchRunner:
                 current = product
                 total_reactions += 1
             reaction_steps = len(path_rows) - 1
-            if reaction_steps > 0:
-                self.all_steps.extend(path_rows)
-                saved_paths += 1
+            self.all_steps.extend(path_rows)
+            self._record_trajectory(path_rows, initial_qed, saved_paths)
+            saved_paths += 1
             self._log_search_progress(
-                attempts=attempts,
+                attempts=starts_seen,
                 saved_paths=saved_paths,
                 total_reactions=total_reactions,
                 last_path_length=reaction_steps,
@@ -310,7 +364,9 @@ class SearchRunner:
                 terminal_qed=path_rows[-1].qed,
                 best_qed=best_qed,
             )
-        return self._finish(self._summary(attempts, saved_paths, total_reactions, best_qed))
+        summary = self._summary(starts_seen, saved_paths, total_reactions, best_qed)
+        summary["starts_seen"] = starts_seen
+        return self._finish(summary)
 
     def _run_exhausted(self):
         saved_paths = 0
@@ -337,6 +393,7 @@ class SearchRunner:
                     )
                 )
             self.all_steps.extend(finalized)
+            self._record_trajectory(finalized, initial_qed, saved_paths)
             saved_paths += 1
             best_qed = max(best_qed, path_rows[-1].qed)
             self._log_search_progress(
