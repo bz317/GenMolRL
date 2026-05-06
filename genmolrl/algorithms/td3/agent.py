@@ -144,6 +144,8 @@ class TD3Agent:
             self._update_target(self.critic2, self.critic2_target, self.tau)
             self._update_target(self.actor, self.actor_target, self.tau)
 
+        self.temperature = max(self.temperature_end, self.temperature * self.temperature_decay)
+
         return {
             "total_iterations": self.total_it,
             "critic_loss": self.critic_loss.item(),
