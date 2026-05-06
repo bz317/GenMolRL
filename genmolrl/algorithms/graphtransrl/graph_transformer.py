@@ -117,7 +117,7 @@ class GraphTransformer(nn.Module):
     ):
         super().__init__()
         if gnn is None or add_self_loops is None:
-            raise ImportError("torch_geometric is required for GraphTransformer.")
+            raise ImportError("torch_geometric is required for GraphTransRL.")
         self.num_layers = int(num_layers)
         self.x2h = mlp(x_dim, num_emb, num_emb, 2)
         self.e2h = mlp(e_dim, num_emb, num_emb, 2)

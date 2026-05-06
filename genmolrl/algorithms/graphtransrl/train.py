@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import pickle
 import random
+import importlib.util
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,15 @@ from genmolrl.chem.reaction_manager import ReactionManager
 from genmolrl.config import resolve_path
 
 STOP_ACTION = "Stop"
+
+
+def require_graphtransrl_dependencies() -> None:
+    if importlib.util.find_spec("torch_geometric") is None:
+        raise ImportError(
+            "GraphTransRL requires torch_geometric. Install it in the active environment, e.g. "
+            "`python -m pip install torch-geometric -f https://data.pyg.org/whl/torch-2.3.0+cu121.html` "
+            "for the current torch==2.3.0+cu121 environment."
+        )
 
 
 def _load_pickle(path: str | Path):
@@ -269,8 +279,9 @@ class GraphTransRL:
 
 
 def train(config: dict, experiment_name: str) -> None:
-    run = init_wandb(config, "graphtransrl", experiment_name)
+    require_graphtransrl_dependencies()
     trainer = GraphTransRL(config)
+    run = init_wandb(config, "graphtransrl", experiment_name)
     training = config.get("training", {})
     total_steps = int(training.get("total_timesteps", training.get("num_steps", 1000)))
     batch_size = int(training.get("batch_size", 16))

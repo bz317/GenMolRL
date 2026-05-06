@@ -54,7 +54,11 @@ conda activate RL_for_new_mol
 
 The environment includes the main dependencies used by the current PPO/A2C/TD3/search experiments, including RDKit, PyTorch, Stable-Baselines3, sb3-contrib, W&B, and FAISS GPU packages. If you run on a machine without a compatible GPU/CUDA setup, TD3 can still import but FAISS/KNN or CUDA execution may fall back or need environment-specific adjustment.
 
-GraphTransRL additionally needs `torch_geometric` compatible with the installed PyTorch/CUDA build, because its policy uses `GENConv` and `TransformerConv`. Install it using the PyTorch Geometric instructions for your environment before running `run_genmolrl_graphtransrl.sh`.
+GraphTransRL additionally needs `torch_geometric` compatible with the installed PyTorch/CUDA build, because its policy uses `GENConv` and `TransformerConv`. For the current `torch==2.3.0+cu121` environment, install it with:
+
+```bash
+python -m pip install torch-geometric -f https://data.pyg.org/whl/torch-2.3.0+cu121.html
+```
 
 GenMolRL is not installed as a site package by default. Run commands with `PYTHONPATH=GenMolRL` from the repository root:
 
