@@ -39,3 +39,11 @@ search:
   results_file: path
   overwrite_results: true
   use_wandb: true
+graphtransrl:
+  num_emb: 64
+  num_layers: 3
+  num_heads: 2
+  learning_rate: 0.0001
+  log_z_lr: 0.001
+  random_action_prob: 0.0
+  device: null

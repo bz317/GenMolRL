@@ -20,6 +20,10 @@ def _trainer(algorithm: str):
 
         def train(config: dict, experiment_name: str):
             return search_train(config, experiment_name, mode=algorithm)
+    elif algorithm == "graphtransrl":
+        from genmolrl.methods.graphtransrl_adapter import GraphTransRLAdapter
+
+        train = GraphTransRLAdapter.train
     else:
         raise ValueError(f"Unsupported algorithm: {algorithm}")
     return train
@@ -29,7 +33,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run a GenMolRL experiment")
     parser.add_argument(
         "--algorithm",
-        choices=["ppo", "a2c", "td3", "random_search", "greedy_search", "exhausted_search"],
+        choices=[
+            "ppo",
+            "a2c",
+            "td3",
+            "random_search",
+            "greedy_search",
+            "exhausted_search",
+            "graphtransrl",
+        ],
         required=True,
     )
     parser.add_argument("--reaction-mode", choices=["uni", "bi"])

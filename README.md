@@ -1,6 +1,6 @@
 # GenMolRL
 
-GenMolRL is the unified molecule-generation project for the current PPO, A2C, and TD3/PGFS experiments. It replaces the previous workflow where PPO/A2C and TD3 were launched from different branch directories with duplicated environment, masking, data staging, reward, and logging logic.
+GenMolRL is the unified molecule-generation project for the current PPO, A2C, TD3/PGFS, and GraphTransRL experiments. It replaces the previous workflow where PPO/A2C and TD3 were launched from different branch directories with duplicated environment, masking, data staging, reward, and logging logic.
 
 The first goal is behavior-compatible migration of:
 
@@ -8,8 +8,9 @@ The first goal is behavior-compatible migration of:
 - `exp_branch_run_A2C_mask.sh`
 - `run_td3.sh`
 - Random Search, Greedy Search, and Exhausted Search baselines
+- GraphTransRL with a graph-transformer policy backbone
 
-The second goal is to provide a structured place for future methods such as SynFlowNet and REINVENT scaffold decorator.
+The second goal is to provide a structured place for future methods such as REINVENT scaffold decorator.
 
 ## Layout
 
@@ -18,10 +19,10 @@ GenMolRL/
   genmolrl/
     chem/          # RDKit reactions, fingerprints, product selection, dataset staging
     envs/          # unified molecule-design Gymnasium env, masks, rewards, starts
-    algorithms/    # PPO, A2C, TD3/PGFS trainers
+    algorithms/    # PPO, A2C, TD3/PGFS, SynFlowNet trainers
                    # plus random and greedy search baselines
     logging/       # W&B metrics and callbacks
-    methods/       # future SynFlowNet / scaffold-decorator adapters
+    methods/       # lazy method adapters
     scripts/       # unified CLI entry points
   configs/         # experiment YAML configs
   tests/           # smoke tests
@@ -51,7 +52,9 @@ conda env update -n RL_for_new_mol -f conda_env_RL_for_new_mol.yml --prune
 conda activate RL_for_new_mol
 ```
 
-The environment includes the main dependencies used by the current experiments, including RDKit, PyTorch, Stable-Baselines3, sb3-contrib, W&B, and FAISS GPU packages. If you run on a machine without a compatible GPU/CUDA setup, TD3 can still import but FAISS/KNN or CUDA execution may fall back or need environment-specific adjustment.
+The environment includes the main dependencies used by the current PPO/A2C/TD3/search experiments, including RDKit, PyTorch, Stable-Baselines3, sb3-contrib, W&B, and FAISS GPU packages. If you run on a machine without a compatible GPU/CUDA setup, TD3 can still import but FAISS/KNN or CUDA execution may fall back or need environment-specific adjustment.
+
+GraphTransRL additionally needs `torch_geometric` compatible with the installed PyTorch/CUDA build, because its policy uses `GENConv` and `TransformerConv`. Install it using the PyTorch Geometric instructions for your environment before running `run_genmolrl_graphtransrl.sh`.
 
 GenMolRL is not installed as a site package by default. Run commands with `PYTHONPATH=GenMolRL` from the repository root:
 
@@ -153,6 +156,7 @@ Use the wrapper scripts from the repository root:
 ./run_genmolrl_random_search.sh
 ./run_genmolrl_greedy_search.sh
 ./run_genmolrl_exhausted_search.sh
+./run_genmolrl_graphtransrl.sh
 ```
 
 Or call the unified launcher directly:
@@ -176,6 +180,7 @@ REACTION_MODE=bi ./run_genmolrl_td3.sh
 MAX_EPISODE_LEN=3 ./run_genmolrl_ppo.sh
 WANDB_MODE=disabled ./run_genmolrl_random_search.sh
 WANDB_MODE=disabled ./run_genmolrl_ppo.sh
+WANDB_MODE=disabled ./run_genmolrl_graphtransrl.sh
 ```
 
 Search runners also accept dataset path overrides:
@@ -186,7 +191,7 @@ TEMPLATE_FILE=data/Uni/templates_unimolecolar_explicit.pkl \
 ./run_genmolrl_random_search.sh
 ```
 
-`TEMPLATES_FILE` is also accepted. Search baselines are test-only, so they use `TEST_FILE` and do not require a train data path. The wrapper scripts use the files already under `data/Uni` by default. Set `STAGE_DATA=true` to validate the staged files before launch, or set both `STAGE_DATA=true` and `STAGE_SOURCE_DIR=<external-uni-split-dir>` when you intentionally want to regenerate the staged files from an external source directory.
+`TEMPLATES_FILE` is also accepted. Search baselines are test-only, so they use `TEST_FILE` and do not require a train data path. The GraphTransRL wrapper accepts `TRAINING_FILE`, `TEST_FILE`, and `TEMPLATES_FILE`. The wrapper scripts use the files already under `data/Uni` by default. Set `STAGE_DATA=true` to validate the staged files before launch, or set both `STAGE_DATA=true` and `STAGE_SOURCE_DIR=<external-uni-split-dir>` when you intentionally want to regenerate the staged files from an external source directory.
 
 ## Supported Algorithms
 
@@ -201,6 +206,18 @@ TEMPLATE_FILE=data/Uni/templates_unimolecolar_explicit.pkl \
 ### TD3/PGFS
 
 `td3` trains the custom PGFS-style TD3 implementation. It learns a template selector plus a continuous R2 vector for bimolecular reactions.
+
+### GraphTransRL
+
+`graphtransrl` trains a GenMolRL-owned graph-transformer RL policy. The method does not learn the first reactant: training episodes start from random molecules sampled from `dataset.training_file`, and each eval pass cycles through every molecule in `dataset.test_file` exactly once.
+
+The policy backbone is a graph transformer with PyG `GENConv` and `TransformerConv` layers. Action logits cover reaction templates plus Stop; there is no exposed `AddFirstReactant` action path in GenMolRL. Rewards are per-action `delta_qed`, and `eval/mean_reward` is the mean summed per-action delta-QED over all test starts. The eval logs also include `eval/avg_delta_qed`, `eval/mean_final_delta_qed`, `eval/max_qed`, `eval/mean_ep_length`, and `eval/n_molecules`.
+
+Run it with:
+
+```bash
+./run_genmolrl_graphtransrl.sh
+```
 
 ### Random Search
 

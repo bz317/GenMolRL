@@ -1,0 +1,33 @@
+project: GenMolRL
+experiment_name: GraphTransRL_Uni
+reaction_mode: uni
+masking: reaction_valid
+reward: delta_qed
+max_episode_len: 5
+dataset:
+  training_file: data/Uni/reactants_full.pkl
+  test_file: data/Uni/reactants_test.pkl
+  templates_file: data/Uni/templates_unimolecolar_explicit.pkl
+  start_strategy: random_pool
+env:
+  algorithm_family: graphtransrl
+  action_design: reaction_graph_action
+  use_stop_action: true
+  reward_round_digits: 3
+  info_qed_round_digits: 3
+training:
+  seed: 42
+  total_timesteps: 100000
+  batch_size: 16
+  eval_freq: 1000
+  save_freq: 5000
+graphtransrl:
+  num_emb: 64
+  num_layers: 3
+  num_heads: 2
+  learning_rate: 0.0001
+  log_z_lr: 0.001
+  weight_decay: 0.0
+  init_log_z: 0.0
+  random_action_prob: 0.0
+  device: null

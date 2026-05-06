@@ -17,6 +17,8 @@ PPO_COMPATIBLE_METRICS = [
     "eval/max_qed",
     "eval/max_episode_qed",
     "eval/mean_final_qed",
+    "eval/mean_final_delta_qed",
+    "eval/avg_delta_qed",
     "eval/std_reward",
     "eval/n_molecules",
     "eval/source_train_global_step",
