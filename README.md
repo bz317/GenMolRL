@@ -504,7 +504,7 @@ stop_penalty_until_step: 3
 
 For the PPO/A2C Uni compatibility configs, this matches the original experiments-branch setup: early Stop is allowed and has zero penalty.
 
-TD3/PGFS currently defaults to `use_stop_action: false` in its compatibility config, following the original PGFS-style action decomposition.
+TD3 Uni now also uses Stop by default for `delta_qed`, because otherwise evaluation is forced to react even when all valid reactions reduce QED. During TD3 warmup, `td3.warmup_stop_probability` controls how often random exploration stores a Stop transition so the critic can learn its zero-reward value.
 
 ## Logging
 

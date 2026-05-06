@@ -29,6 +29,8 @@ training:
   n_envs: 1
 ppo:
   target_kl: null
+td3:
+  warmup_stop_probability: 0.1
 search:
   max_paths: null
   max_attempts: null

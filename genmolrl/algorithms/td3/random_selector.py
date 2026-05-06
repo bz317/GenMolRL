@@ -22,11 +22,13 @@ def stop_action(env):
     return template_one_hot, r2
 
 
-def select_random_action(env, smiles_string):
+def select_random_action(env, smiles_string, *, stop_probability: float = 0.0):
     rm = env.unwrapped.reaction_manager
     templates = env.unwrapped.templates
     mask_kind = getattr(env.unwrapped.mask_provider, "mode", "r2_available")
     feasible = rm.feasible_first_reactant_templates(smiles_string, kind=mask_kind)
+    if feasible and getattr(env.unwrapped, "use_stop_action", False) and random.random() < float(stop_probability):
+        return stop_action(env)
     if not feasible:
         mask = rm.get_mask(smiles_string, kind=mask_kind)
         if mask is None or int(mask.sum().item()) == 0:

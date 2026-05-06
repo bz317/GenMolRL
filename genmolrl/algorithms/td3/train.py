@@ -156,6 +156,7 @@ def train(config: dict, experiment_name: str):
     batch_size = int(td3_cfg.get("batch_size", 64))
     save_freq = int(config["callbacks"].get("model_save_freq", 5000))
     eval_freq = int(train_cfg.get("eval_freq", 10000))
+    warmup_stop_probability = float(td3_cfg.get("warmup_stop_probability", 0.1))
     checkpoint_dir = project_root() / "runs" / run.id / "td3_checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -180,7 +181,11 @@ def train(config: dict, experiment_name: str):
             if steps_done < start_timesteps:
                 env.disable()
                 try:
-                    action = select_random_action(env, info["SMILES"])
+                    action = select_random_action(
+                        env,
+                        info["SMILES"],
+                        stop_probability=warmup_stop_probability,
+                    )
                 except NoValidActionError:
                     steps_done -= 1
                     episode_len -= 1
