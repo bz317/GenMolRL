@@ -26,8 +26,8 @@ class ReplayBuffer:
         idx = self.index
         self.state_smiles[idx] = state_smiles
         self.state_tensors[idx] = torch.as_tensor(state_obs, dtype=torch.float32, device=self.device)
-        self.templates[idx] = template.clone().detach()
-        self.r2_vectors[idx] = r2_vector.clone().detach()
+        self.templates[idx] = torch.as_tensor(template, dtype=torch.float32, device=self.device).reshape(-1)
+        self.r2_vectors[idx] = torch.as_tensor(r2_vector, dtype=torch.float32, device=self.device).reshape(-1)
         self.rewards[idx] = torch.as_tensor([reward], dtype=torch.float32, device=self.device)
         self.next_state_smiles[idx] = next_state_smiles
         self.next_state_tensors[idx] = torch.as_tensor(next_state_obs, dtype=torch.float32, device=self.device)
