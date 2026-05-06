@@ -5,7 +5,7 @@ masking: reaction_valid
 reward: delta_qed
 max_episode_len: 5
 dataset:
-  training_file: data/Uni/reactants_train.pkl
+  training_file: data/Uni/reactants_full.pkl
   test_file: data/Uni/reactants_test.pkl
   templates_file: data/Uni/templates_unimolecolar_explicit.pkl
   start_strategy: random_pool

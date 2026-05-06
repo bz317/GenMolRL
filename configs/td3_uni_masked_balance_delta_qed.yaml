@@ -1,0 +1,38 @@
+project: GenMolRL
+experiment_name: TD3_Uni_Balance
+reaction_mode: uni
+masking: reaction_valid
+reward: delta_qed
+max_episode_len: 5
+dataset:
+  training_file: data/Uni/reactants_train_balance.pkl
+  test_file: data/Uni/reactants_test_balance.pkl
+  templates_file: data/Uni/templates_unimolecolar_explicit.pkl
+  start_strategy: random_pool
+  start_smiles_file_eval: data/Uni/eval_start_smiles.txt
+env:
+  algorithm_family: td3_pgfs
+  action_design: pgfs_continuous_r2
+  use_stop_action: false
+  invalid_reaction_penalty: -1.0
+training:
+  seed: 42
+  total_timesteps: 1000000
+  start_timesteps: 10000
+  n_envs: 1
+td3:
+  actor_lr: 0.0001
+  critic_lr: 0.0003
+  gamma: 0.99
+  tau: 0.005
+  batch_size: 64
+  buffer_size: 500000
+  policy_freq: 2
+  policy_noise: 0.2
+  noise_std: 0.1
+  noise_clip: 0.2
+  initial_temperature: 1.0
+  min_temperature: 0.25
+callbacks:
+  model_save_freq: 5000
+  gradient_save_freq: 100

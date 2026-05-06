@@ -1,7 +1,7 @@
 project: GenMolRL
 experiment_name: TD3_Uni
 reaction_mode: uni
-masking: r2_available
+masking: reaction_valid
 reward: delta_qed
 max_episode_len: 5
 dataset:

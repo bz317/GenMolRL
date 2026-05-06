@@ -3,7 +3,7 @@ experiment_name: ExhaustedSearch_Uni
 reaction_mode: uni
 masking: reaction_valid
 reward: delta_qed
-max_episode_len: 5
+max_episode_len: 10
 dataset:
   test_file: data/Uni/reactants_test.pkl
   templates_file: data/Uni/templates_unimolecolar_explicit.pkl
