@@ -215,6 +215,69 @@ TEMPLATE_FILE=data/Uni/templates_unimolecolar_explicit.pkl \
 
 `td3` trains the custom PGFS-style TD3 implementation. It learns a template selector plus a continuous R2 vector for bimolecular reactions.
 
+#### Uni `delta_qed` convergence ceiling
+
+On the Uni `delta_qed` benchmark with the standard 12,689-molecule test set
+(`mean_start_qed ≈ 0.693`), TD3 reproducibly plateaus at
+`eval/mean_final_delta_qed ≈ -0.018` regardless of the standard hyperparameter
+levers we have tried. PPO/A2C reach roughly `+0.04` on the same benchmark. The
+ceiling is reproducible across:
+
+- continuous PGFS (`pgfs_continuous_r2`) and discrete uni (`td3_uni_discrete`)
+  action designs,
+- `use_stop_action: true` (collapses to "always Stop", reward = 0) and
+  `use_stop_action: false` (forced reactions, mean ΔQED ≈ -0.018),
+- `start_timesteps` from 10k up to 200k of purely-random warm-up,
+- ε-greedy template injection during training rollouts
+  (`td3.training_random_action_prob` decaying 0.3 → 0.05 over 500k steps),
+- higher Gumbel-Softmax temperature (`initial_temperature: 2.0`,
+  `min_temperature: 0.7`).
+
+Empirically, with Stop disabled the policy converges to a deterministic single
+template per state and `eval/mean_final_delta_qed` becomes flat to 4–5 decimal
+places from ~10k after warmup onward — i.e. exactly the fixed point the
+TD3 critic + actor agree on.
+
+The gap to PPO/A2C is structural rather than a hyperparameter problem:
+
+- TD3 is a deterministic-greedy actor that selects `argmax_a Q(s, a)`.
+  With `reward: delta_qed`, average reactions on already-drug-like starts are
+  slightly negative, so:
+    - with Stop available, `Q(Stop) = 0` is an unbeatable plateau and the
+      actor collapses to "always Stop" (`eval/stop_rate = 1`,
+      `eval/mean_reward = 0`);
+    - with Stop disabled, the actor must react even on starts where every
+      valid template lowers QED, so `eval/mean_final_delta_qed` is anchored
+      by the ~60% of starts whose best template is still negative.
+- PPO/A2C avoid both traps with a stochastic categorical policy plus a value
+  baseline: their gradient amplifies above-baseline templates *relative to the
+  value baseline*, and a per-state nuanced "Stop on high-QED, react on
+  low-QED" policy emerges naturally. The deterministic Q-greedy actor in TD3
+  cannot represent that without algorithmic changes.
+
+Levers that *could* break the -0.018 ceiling (not yet implemented in this
+repo):
+
+- A **conditional Stop penalty** in the env: keep `use_stop_action: true`
+  for TD3 but apply `stop_early_penalty` only when feasible reactions
+  existed at the time Stop was selected. This removes the "Stop is free
+  while reactions are negative" attractor without penalizing forced Stops
+  on dead-end intermediates.
+- Switching the TD3 reward to `final_qed`, which rewards ending at high
+  QED rather than improving it; this eliminates the "no-headroom on
+  high-QED starts" trap, at the cost of a different optimization target
+  than the PPO/A2C / GraphTransRL baselines use.
+- Adding **entropy regularization** to the actor (SAC-style discrete),
+  so the policy is itself a stochastic categorical and the
+  exploration/exploitation trade-off is principled rather than relying on
+  ε-greedy mixing into the replay buffer.
+
+Until one of those is implemented, the configs in
+`configs/td3_uni_*_masked_delta_qed.yaml` represent the best result we have
+observed for TD3 on this benchmark. The ε-greedy / warm-up / temperature /
+no-Stop knobs are wired so this conclusion can be reproduced (and revisited
+once the algorithmic change is made) without code edits.
+
 ### GraphTransRL
 
 `graphtransrl` trains a GenMolRL-owned graph-transformer RL policy. The method does not learn the first reactant: training episodes start from random molecules sampled from `dataset.training_file`, and each eval pass cycles through every molecule in `dataset.test_file` exactly once.
@@ -524,7 +587,18 @@ stop_penalty_until_step: 3
 
 For the PPO/A2C Uni compatibility configs, this matches the original experiments-branch setup: early Stop is allowed and has zero penalty.
 
-TD3 Uni now also uses Stop by default for `delta_qed`, because otherwise evaluation is forced to react even when all valid reactions reduce QED. During TD3 warmup, `td3.warmup_stop_probability` controls how often random exploration stores a Stop transition so the critic can learn its zero-reward value.
+TD3 Uni currently **disables Stop** (`env.use_stop_action: false`) for
+`delta_qed`, because with Stop enabled the deterministic-greedy actor
+collapses to "always Stop": `Q(Stop) = 0` dominates the slightly-negative
+mean of `reaction_valid` reactions, so `eval/stop_rate` saturates at 1.0
+within a few thousand steps. With Stop disabled, episodes terminate when no
+feasible templates remain or when `max_episode_len` is reached, and TD3
+plateaus at `eval/mean_final_delta_qed ≈ -0.018` (see "TD3/PGFS → Uni
+`delta_qed` convergence ceiling" for the full discussion).
+
+`td3.warmup_stop_probability` is kept for compatibility but has no effect
+when `use_stop_action: false` because Stop is not a legal action and the
+warmup random selector skips that branch.
 
 ## Logging
 
