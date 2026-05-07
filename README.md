@@ -156,7 +156,9 @@ Use the wrapper scripts from the repository root:
 ```bash
 ./run_genmolrl_ppo.sh
 ./run_genmolrl_a2c.sh
-./run_genmolrl_td3.sh
+./run_genmolrl_td3_continuous.sh   # uni TD3, PGFS continuous R2 head
+./run_genmolrl_td3_discrete.sh      # uni TD3, template-only critic
+./run_genmolrl_td3.sh               # alias → continuous (backward compatible)
 ./run_genmolrl_random_search.sh
 ./run_genmolrl_greedy_search.sh
 ./run_genmolrl_exhausted_search.sh
@@ -180,9 +182,9 @@ Common environment overrides:
 EXPERIMENT_NAME=PPO_Uni_test ./run_genmolrl_ppo.sh
 MASKING=none ./run_genmolrl_ppo.sh
 REWARD=final_qed ./run_genmolrl_a2c.sh
-REACTION_MODE=bi ./run_genmolrl_td3.sh              # optional; overrides YAML only when set
-WANDB_PROJECT=MyTeam EXPERIMENT_NAME=my_td3_run ./run_genmolrl_td3.sh   # TD3 W&B project / run name (defaults in script)
-CONFIG=configs/td3_uni_discrete_masked_delta_qed.yaml ./run_genmolrl_td3.sh   # discrete vs continuous from YAML
+REACTION_MODE=bi ./run_genmolrl_td3_continuous.sh    # optional; overrides YAML only when set
+WANDB_PROJECT=MyTeam EXPERIMENT_NAME=my_td3_run ./run_genmolrl_td3_continuous.sh
+CONFIG=configs/td3_uni_masked_balance_delta_qed.yaml ./run_genmolrl_td3_continuous.sh   # override YAML path only when needed
 MAX_EPISODE_LEN=3 ./run_genmolrl_ppo.sh
 WANDB_MODE=disabled ./run_genmolrl_random_search.sh
 WANDB_MODE=disabled ./run_genmolrl_ppo.sh
@@ -375,7 +377,7 @@ Masking (`none`, `substructure`, `reaction_valid`, `r2_available`) is unchanged 
 
 Example configs: `configs/td3_uni_continuous_masked_delta_qed.yaml` (continuous) vs `configs/td3_uni_discrete_masked_delta_qed.yaml` (discrete).
 
-Use **`run_genmolrl_td3.sh`** for experiment setup: it exports **`WANDB_PROJECT`** (default `GenMolRL`) and passes **`EXPERIMENT_NAME`** (defaults `TD3_Uni_Continuous` vs `TD3_Uni_Discrete` based on whether `CONFIG` matches `*td3_uni_discrete*`). Hyperparameters—including **`env.action_design`** (discrete vs continuous), **`masking`**, **`reward`**, and **`td3.*`**—come from the YAML. Export **`REACTION_MODE`**, **`MASKING`**, or **`REWARD`** only when you intentionally override the config file.
+Use **`run_genmolrl_td3_continuous.sh`** or **`run_genmolrl_td3_discrete.sh`** for experiment setup: both export **`WANDB_PROJECT`** (default `GenMolRL`) and pass **`EXPERIMENT_NAME`** (defaults `TD3_Uni_Continuous` vs `TD3_Uni_Discrete`). **`run_genmolrl_td3.sh`** is a backward-compatible alias for the continuous runner. Hyperparameters—including **`env.action_design`**, **`masking`**, **`reward`**, and **`td3.*`**—come from each runner’s default YAML (override with **`CONFIG=...`**). Export **`REACTION_MODE`**, **`MASKING`**, or **`REWARD`** only when you intentionally override the config file.
 
 ## Masking Modes
 

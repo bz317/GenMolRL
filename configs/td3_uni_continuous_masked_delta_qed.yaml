@@ -4,7 +4,7 @@
 # Policy: template logits + continuous R2 fingerprint head (same width as Morgan FP).
 # Uni templates ignore the R2 output; env uses KNNWrapper for bi-style paths.
 # Hyperparameters live here (including discrete vs continuous via env.action_design).
-# W&B run name / project: set in run_genmolrl_td3.sh (EXPERIMENT_NAME, WANDB_PROJECT).
+# W&B run name / project: set in run_genmolrl_td3_continuous.sh (EXPERIMENT_NAME, WANDB_PROJECT).
 # Authoritative switch: env.action_design below (must be pgfs_continuous_r2).
 # =============================================================================
 reaction_mode: uni

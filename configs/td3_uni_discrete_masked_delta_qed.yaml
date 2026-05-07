@@ -4,7 +4,7 @@
 # Policy: template logits only; critic Q(s, template) with no R2 dimensions.
 # No KNNWrapper. Requires reaction_mode: uni.
 # Hyperparameters live here (including discrete vs continuous via env.action_design).
-# W&B run name / project: set in run_genmolrl_td3.sh (EXPERIMENT_NAME, WANDB_PROJECT).
+# W&B run name / project: set in run_genmolrl_td3_discrete.sh (EXPERIMENT_NAME, WANDB_PROJECT).
 # Authoritative switch: env.action_design below (must be td3_uni_discrete).
 # =============================================================================
 reaction_mode: uni
