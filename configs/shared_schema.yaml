@@ -27,6 +27,9 @@ training:
   start_timesteps: 10000
   eval_freq: 10000
   n_envs: 1
+callbacks:
+  model_save_freq: 100000 # SB3 / TD3 checkpoint cadence when YAML omits explicit callbacks
+  gradient_save_freq: 100
 ppo:
   target_kl: null
 td3:

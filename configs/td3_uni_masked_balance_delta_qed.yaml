@@ -38,5 +38,5 @@ td3:
   warmup_stop_probability: 0.1
   save_replay_buffer_in_checkpoints: false
 callbacks:
-  model_save_freq: 5000
+  model_save_freq: 100000
   gradient_save_freq: 100

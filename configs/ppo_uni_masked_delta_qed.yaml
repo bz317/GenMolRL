@@ -37,5 +37,5 @@ ppo:
   target_kl: 0.02
   progress_bar: false
 callbacks:
-  model_save_freq: 5000
+  model_save_freq: 100000
   gradient_save_freq: 100

@@ -210,7 +210,7 @@ def train(config: dict, experiment_name: str):
     max_timesteps = int(train_cfg.get("total_timesteps", 1_000_000))
     start_timesteps = int(train_cfg.get("start_timesteps", 10000))
     batch_size = int(td3_cfg.get("batch_size", 64))
-    save_freq = int(config["callbacks"].get("model_save_freq", 5000))
+    save_freq = int(config["callbacks"].get("model_save_freq", 100000))
     eval_freq = int(train_cfg.get("eval_freq", 10000))
     warmup_stop_probability = float(td3_cfg.get("warmup_stop_probability", 0.1))
     save_replay_buffer_in_checkpoints = bool(td3_cfg.get("save_replay_buffer_in_checkpoints", False))

@@ -34,5 +34,5 @@ a2c:
   device: cpu
   progress_bar: false
 callbacks:
-  model_save_freq: 5000
+  model_save_freq: 100000
   gradient_save_freq: 100

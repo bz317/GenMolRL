@@ -114,13 +114,13 @@ def sb3_callbacks(config: dict, run_id: str, eval_env=None):
     callbacks = [
         WandbCallback(
             model_save_path=str(paths / "wandb_model"),
-            model_save_freq=int(config["callbacks"].get("model_save_freq", 5000)),
+            model_save_freq=int(config["callbacks"].get("model_save_freq", 100000)),
             gradient_save_freq=int(config["callbacks"].get("gradient_save_freq", 100)),
             log="all",
             verbose=1,
         ),
         CheckpointCallback(
-            save_freq=int(config["callbacks"].get("model_save_freq", 5000)),
+            save_freq=int(config["callbacks"].get("model_save_freq", 100000)),
             save_path=str(ckpt_dir),
             name_prefix=config.get("algorithm", "model").lower(),
         ),

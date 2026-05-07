@@ -20,7 +20,7 @@ training:
   total_timesteps: 100000
   batch_size: 16
   eval_freq: 1000
-  save_freq: 5000
+  save_freq: 100000
 graphtransrl:
   num_emb: 64
   num_layers: 3
