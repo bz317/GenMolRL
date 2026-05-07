@@ -27,8 +27,8 @@ graphtransrl:
   num_emb: 64
   num_layers: 3
   num_heads: 2
-  learning_rate: 0.0001
-  log_z_lr: 0.001
+  learning_rate: 0.00005
+  log_z_lr: 0.0005
   weight_decay: 0.0
   init_log_z: 0.0
   # Epsilon-greedy template exploration with linear decay (PPO/A2C-style spread)
