@@ -67,9 +67,14 @@ td3:
   # When false the original deterministic-greedy / Gumbel-Softmax path is used.
   # Restricted to reaction_mode=uni (entropy path assumes R2=0 for all actions).
   entropy_regularization: true
-  # Entropy bonus weight. Larger alpha encourages broader policies; with
-  # ~80-100 templates, max entropy ≈ log(N) ≈ 4.5, so 0.1-0.3 is a sane range.
-  entropy_alpha: 0.2
+  # Entropy bonus weight. Uni mode has 15 templates + Stop = 16 actions, so the
+  # max categorical entropy is log(16) ≈ 2.77 nats. Per-step ΔQED is roughly
+  # ±0.04 and episodes are ≤5 steps, so |Q| typically lives in ~0.1-0.3. We pick
+  # alpha so that alpha * H_max is comparable to (not dominating) |Q|:
+  #   alpha=0.05 → bonus ≈ 0.14 (light; Q dominates quickly, may still collapse)
+  #   alpha=0.1  → bonus ≈ 0.28 (balanced; recommended starting point)
+  #   alpha=0.2  → bonus ≈ 0.55 (heavy; policy stays near uniform, Q can't pull it)
+  entropy_alpha: 0.1
   save_replay_buffer_in_checkpoints: false
 callbacks:
   model_save_freq: 100000
