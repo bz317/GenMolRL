@@ -20,9 +20,36 @@ def test_ppo_uni_env_reset():
     env.close()
 
 
+def test_td3_td3_template_mask_kind_matches_yaml_masking():
+    register_envs()
+    cfg = load_config("configs/td3_uni_continuous_masked_delta_qed.yaml")
+    kwargs = env_kwargs(cfg)
+    kwargs["algorithm_family"] = "td3_pgfs"
+    kwargs["append_action_mask_to_obs"] = False
+    env = gym.make(ENV_ID, **kwargs)
+    from genmolrl.algorithms.td3.mask_kind import td3_template_mask_kind
+
+    assert td3_template_mask_kind(env) == env.unwrapped.mask_provider.mode
+    env.close()
+
+
+def test_td3_uni_discrete_env_reset():
+    register_envs()
+    cfg = load_config("configs/td3_uni_discrete_masked_delta_qed.yaml")
+    kwargs = env_kwargs(cfg)
+    kwargs["algorithm_family"] = "td3_pgfs"
+    kwargs["append_action_mask_to_obs"] = False
+    env = gym.make(ENV_ID, **kwargs)
+    obs, info = env.reset(seed=42)
+    assert obs.shape[0] == 1024
+    assert info["SMILES"]
+    assert env.unwrapped.action_design == "td3_uni_discrete"
+    env.close()
+
+
 def test_td3_uni_env_reset():
     register_envs()
-    cfg = load_config("configs/td3_uni_masked_delta_qed.yaml")
+    cfg = load_config("configs/td3_uni_continuous_masked_delta_qed.yaml")
     kwargs = env_kwargs(cfg)
     kwargs["algorithm_family"] = "td3_pgfs"
     kwargs["append_action_mask_to_obs"] = False

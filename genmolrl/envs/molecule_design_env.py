@@ -13,6 +13,7 @@ from genmolrl.chem.datasets import load_pickle
 from genmolrl.chem.fingerprints import morgan_fp_array
 from genmolrl.chem.reaction_manager import BI_TYPE, ReactionManager
 from genmolrl.config import resolve_path
+from genmolrl.algorithms.td3.constants import TD3_UNI_DISCRETE_ACTION_DESIGN
 from genmolrl.envs.action_spaces import ActionSpaceSpec
 from genmolrl.envs.masking import MaskProvider
 from genmolrl.envs.rewards import RewardFunction, qed
@@ -105,6 +106,17 @@ class MoleculeDesignEnv(gym.Env):
             dtype=np.float32,
         )
 
+        if self.algorithm_family == "td3_pgfs":
+            _allowed_td3_designs = {"pgfs_continuous_r2", TD3_UNI_DISCRETE_ACTION_DESIGN}
+            if self.action_design not in _allowed_td3_designs:
+                raise ValueError(
+                    f"td3_pgfs requires env.action_design in {_allowed_td3_designs}, got {self.action_design!r}"
+                )
+            if self.action_design == TD3_UNI_DISCRETE_ACTION_DESIGN and self.reaction_mode != "uni":
+                raise ValueError(
+                    f"env.action_design {TD3_UNI_DISCRETE_ACTION_DESIGN!r} requires reaction_mode: uni"
+                )
+
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         self.current_step = 0
@@ -173,7 +185,7 @@ class MoleculeDesignEnv(gym.Env):
             )
             info = self._get_info()
             info.update({"stop": True, "stop_reward": reward})
-            return np.zeros(self.observation_space.shape[0], dtype=np.float32), reward, False, True, info
+            return self._get_obs(), reward, False, True, info
 
         template = self.templates.get(template_index)
         if template is None:

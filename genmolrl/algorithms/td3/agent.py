@@ -9,7 +9,9 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 
-from genmolrl.algorithms.td3.models import ActorNetwork, CriticNetwork
+from genmolrl.algorithms.td3.constants import TD3_UNI_DISCRETE_ACTION_DESIGN
+from genmolrl.algorithms.td3.mask_kind import td3_template_mask_kind
+from genmolrl.algorithms.td3.models import ActorNetwork, ActorNetworkUniDiscrete, CriticNetwork
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -38,17 +40,23 @@ class TD3Agent:
         temperature_end=0.1,
         start_timesteps=3000,
         max_timesteps=1000000,
+        template_mask_kind: str | None = None,
     ):
         self.env = env
         self.state_dim = env.unwrapped.observation_space.shape[0]
         self.template_dim = env.unwrapped.action_space.n
-        self.action_dim = env.unwrapped.observation_space.shape[0]
+        obs_dim = env.unwrapped.observation_space.shape[0]
+        self.discrete_uni = getattr(env.unwrapped, "action_design", "") == TD3_UNI_DISCRETE_ACTION_DESIGN
+        self.continuous_r2_dim = 0 if self.discrete_uni else obs_dim
 
-        self.actor = ActorNetwork(self.state_dim, self.template_dim, self.action_dim).to(device)
+        if self.discrete_uni:
+            self.actor = ActorNetworkUniDiscrete(self.state_dim, self.template_dim).to(device)
+        else:
+            self.actor = ActorNetwork(self.state_dim, self.template_dim, obs_dim).to(device)
         self.actor_target = deepcopy(self.actor)
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=actor_lr)
-        self.critic1 = CriticNetwork(self.state_dim, self.template_dim, self.action_dim).to(device)
-        self.critic2 = CriticNetwork(self.state_dim, self.template_dim, self.action_dim).to(device)
+        self.critic1 = CriticNetwork(self.state_dim, self.template_dim, self.continuous_r2_dim).to(device)
+        self.critic2 = CriticNetwork(self.state_dim, self.template_dim, self.continuous_r2_dim).to(device)
         self.critic1_target = deepcopy(self.critic1)
         self.critic2_target = deepcopy(self.critic2)
         self.critic_optimizer = optim.Adam(list(self.critic1.parameters()) + list(self.critic2.parameters()), lr=critic_lr)
@@ -67,10 +75,11 @@ class TD3Agent:
         self.total_it = 0
         self.actor_loss = None
         self.critic_loss = None
+        self._template_mask_kind_override = template_mask_kind
 
     def _template_mask_info(self, smiles_batch):
         rm = self.env.unwrapped.reaction_manager
-        mask_kind = getattr(self.env.unwrapped.mask_provider, "mode", "r2_available")
+        mask_kind = td3_template_mask_kind(self.env, override=self._template_mask_kind_override)
         template_types = rm.template_types.to(device)
         masks = [rm.get_mask(smile, kind=mask_kind) for smile in smiles_batch]
         mask_tensor = torch.stack(masks).to(device)
@@ -95,7 +104,7 @@ class TD3Agent:
         self.actor.eval() if evaluate else self.actor.train()
         with torch.no_grad():
             template, r2_vector = self.actor(state, mask_info, self.temperature, evaluate=evaluate)
-        if torch.any(r2_vector != 0) and not evaluate:
+        if self.continuous_r2_dim > 0 and torch.any(r2_vector != 0) and not evaluate:
             r2_vector = r2_vector + torch.randn_like(r2_vector) * self.noise_std
         return template, r2_vector
 
@@ -120,9 +129,20 @@ class TD3Agent:
         next_masks_info = self._template_mask_info(next_state_smiles)
 
         with torch.no_grad():
-            noise = (torch.randn_like(r2_vectors) * self.policy_noise).clamp(-self.noise_clip, self.noise_clip)
-            next_templates, next_r2_vectors = self.actor_target(next_state_obs, next_masks_info, self.temperature)
-            next_r2_vectors = (next_r2_vectors + noise).clamp(-self.max_action, self.max_action)
+            # Deterministic target actions + clipped Gaussian noise on the continuous R2 head only
+            # (standard TD3). Stochastic Gumbel templates here inject biased, high-variance targets.
+            next_templates, next_r2_vectors = self.actor_target(
+                next_state_obs, next_masks_info, self.temperature, evaluate=True
+            )
+            noise = (torch.randn_like(next_r2_vectors) * self.policy_noise).clamp(-self.noise_clip, self.noise_clip)
+            _, template_types_next = next_masks_info
+            next_template_idx = next_templates.argmax(dim=-1)
+            is_bimolecular = (
+                (template_types_next[next_template_idx] == 1).reshape(-1, 1).to(dtype=noise.dtype)
+                if self.continuous_r2_dim > 0
+                else torch.zeros((next_state_obs.size(0), 1), device=noise.device, dtype=noise.dtype)
+            )
+            next_r2_vectors = (next_r2_vectors + noise * is_bimolecular).clamp(-self.max_action, self.max_action)
             target_q1 = self.critic1_target(next_state_obs, next_templates, next_r2_vectors)
             target_q2 = self.critic2_target(next_state_obs, next_templates, next_r2_vectors)
             target_q = rewards + not_dones * self.gamma * torch.min(target_q1, target_q2)
@@ -159,7 +179,7 @@ class TD3Agent:
         for target_param, param in zip(source.parameters(), target.parameters()):
             target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
-    def save_model(self, filename, steps_done, episode_count, replay_buffer):
+    def save_model(self, filename, steps_done, episode_count, replay_buffer, *, include_replay_buffer: bool = False):
         state_dict = {
             "actor_state_dict": self.actor.state_dict(),
             "critic1_state_dict": self.critic1.state_dict(),
@@ -175,8 +195,9 @@ class TD3Agent:
             "critic_loss": _loss_value_for_checkpoint(self.critic_loss),
             "steps_done": steps_done,
             "episode_count": episode_count,
-            "replay_buffer": replay_buffer,
         }
+        if include_replay_buffer:
+            state_dict["replay_buffer"] = replay_buffer
         torch.save(state_dict, filename, pickle_protocol=5)
 
     def apply_checkpoint(self, checkpoint, source_label="checkpoint"):
@@ -192,7 +213,7 @@ class TD3Agent:
         self.temperature = checkpoint.get("temperature", 1.0)
         self.actor_loss = checkpoint.get("actor_loss", None)
         self.critic_loss = checkpoint.get("critic_loss", None)
-        return checkpoint.get("steps_done", 0), checkpoint.get("episode_count", 0), checkpoint["replay_buffer"]
+        return checkpoint.get("steps_done", 0), checkpoint.get("episode_count", 0), checkpoint.get("replay_buffer")
 
     def load_model(self, filename):
         try:

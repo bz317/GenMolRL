@@ -180,7 +180,9 @@ Common environment overrides:
 EXPERIMENT_NAME=PPO_Uni_test ./run_genmolrl_ppo.sh
 MASKING=none ./run_genmolrl_ppo.sh
 REWARD=final_qed ./run_genmolrl_a2c.sh
-REACTION_MODE=bi ./run_genmolrl_td3.sh
+REACTION_MODE=bi ./run_genmolrl_td3.sh              # optional; overrides YAML only when set
+WANDB_PROJECT=MyTeam EXPERIMENT_NAME=my_td3_run ./run_genmolrl_td3.sh   # TD3 W&B project / run name (defaults in script)
+CONFIG=configs/td3_uni_discrete_masked_delta_qed.yaml ./run_genmolrl_td3.sh   # discrete vs continuous from YAML
 MAX_EPISODE_LEN=3 ./run_genmolrl_ppo.sh
 WANDB_MODE=disabled ./run_genmolrl_random_search.sh
 WANDB_MODE=disabled ./run_genmolrl_ppo.sh
@@ -351,13 +353,29 @@ The first component is template/Stop. The second component is the R2 index. For 
 
 Used by custom TD3/PGFS.
 
-The learned action is:
+The vector passed to `env.step` is always `(template_one_hot, r2_placeholder_tensor)`. Gym’s declared space remains **`Discrete(num_templates + stop)`** for compatibility; the placeholder’s width depends on **`env.action_design`**:
 
-```text
-(template_one_hot, r2_vector)
-```
+#### `pgfs_continuous_r2` (continuous PGFS-style head)
 
-For Uni templates, R2 is a zero/no-op vector. For Bi templates, the continuous R2 vector is converted to a discrete second reactant through KNN.
+Default for uni TD3 configs that compare against the full PGFS parameterization.
+
+- **Actor:** template logits + **continuous R2 head** (output dim = Morgan FP length, same as `observation_space` without appended masks). Uni templates never use the R2 output (zeros); bi templates feed KNN.
+- **Critic:** `Q(state, template_one_hot, r2_vector)` with that full R2 width.
+- **Rollout:** wrapped in **`KNNWrapper`**, which maps the continuous R2 vector to a discrete pool SMILES for bimolecular templates.
+
+#### `td3_uni_discrete` (discrete template-only TD3)
+
+For **`reaction_mode: uni`** comparison runs only.
+
+- **Actor:** **template logits only** (no Pi / R2 network). The second tensor in the step tuple has shape **`(0,)`** (empty).
+- **Critic:** `Q(state, template_one_hot)` — no R2 channels in the network or replay buffer.
+- **Rollout:** **no `KNNWrapper`** (unnecessary when all templates are uni-molecular).
+
+Masking (`none`, `substructure`, `reaction_valid`, `r2_available`) is unchanged and controlled by the top-level **`masking`** field for both modes.
+
+Example configs: `configs/td3_uni_continuous_masked_delta_qed.yaml` (continuous) vs `configs/td3_uni_discrete_masked_delta_qed.yaml` (discrete).
+
+Use **`run_genmolrl_td3.sh`** for experiment setup: it exports **`WANDB_PROJECT`** (default `GenMolRL`) and passes **`EXPERIMENT_NAME`** (defaults `TD3_Uni_Continuous` vs `TD3_Uni_Discrete` based on whether `CONFIG` matches `*td3_uni_discrete*`). Hyperparameters—including **`env.action_design`** (discrete vs continuous), **`masking`**, **`reward`**, and **`td3.*`**—come from the YAML. Export **`REACTION_MODE`**, **`MASKING`**, or **`REWARD`** only when you intentionally override the config file.
 
 ## Masking Modes
 

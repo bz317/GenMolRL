@@ -7,6 +7,27 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def apply_td3_template_mask(
+    logits: torch.Tensor,
+    template_mask_info,
+    *,
+    temperature: float,
+    evaluate: bool,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Masked template softmax / Gumbel-Softmax (hard); optional ``template_types`` for bi heads."""
+    if template_mask_info is None:
+        if evaluate:
+            selected_templates = logits.argmax(dim=-1)
+            return F.one_hot(selected_templates, num_classes=logits.size(1)).float(), None
+        return F.gumbel_softmax(logits, tau=temperature, hard=True), None
+    template_mask, template_types = template_mask_info
+    masked_logits = logits + (1 - template_mask) * (-1e9)
+    if evaluate:
+        selected_templates = masked_logits.argmax(dim=-1)
+        return F.one_hot(selected_templates, num_classes=masked_logits.size(1)).float(), template_types
+    return F.gumbel_softmax(masked_logits, tau=temperature, hard=True), template_types
+
+
 class FNetwork(nn.Module):
     def __init__(self, input_dim: int, output_dim: int, hidden_dims: list[int] | None = None):
         super().__init__()
@@ -66,7 +87,9 @@ class ActorNetwork(nn.Module):
         evaluate: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         self.logits = self.f_net(state)
-        template_one_hot, template_types = self._apply_template_mask(template_mask_info, temperature, evaluate)
+        template_one_hot, template_types = apply_td3_template_mask(
+            self.logits, template_mask_info, temperature=temperature, evaluate=evaluate
+        )
         template_indices = template_one_hot.argmax(dim=-1)
 
         if template_types is not None:
@@ -81,21 +104,28 @@ class ActorNetwork(nn.Module):
             r2_vector[is_bimolecular] = self.pi_net(bimolecular_states)
         return template_one_hot, r2_vector
 
-    def _apply_template_mask(self, template_mask_info, temperature: float, evaluate: bool):
-        if self.logits is None:
-            raise RuntimeError("Actor logits are not initialized.")
-        if template_mask_info is None:
-            if evaluate:
-                selected_templates = self.logits.argmax(dim=-1)
-                return F.one_hot(selected_templates, num_classes=self.logits.size(1)).float(), None
-            return F.gumbel_softmax(self.logits, tau=temperature, hard=True), None
 
-        template_mask, template_types = template_mask_info
-        masked_logits = self.logits + (1 - template_mask) * (-1e9)
-        if evaluate:
-            selected_templates = masked_logits.argmax(dim=-1)
-            return F.one_hot(selected_templates, num_classes=masked_logits.size(1)).float(), template_types
-        return F.gumbel_softmax(masked_logits, tau=temperature, hard=True), template_types
+class ActorNetworkUniDiscrete(nn.Module):
+    """Uni-only TD3 actor: template logits only (no continuous R2 / Pi head)."""
+
+    def __init__(self, state_dim: int, template_dim: int):
+        super().__init__()
+        self.f_net = FNetwork(state_dim, template_dim)
+        self.logits: torch.Tensor | None = None
+
+    def forward(
+        self,
+        state: torch.Tensor,
+        template_mask_info=None,
+        temperature: float = 1.0,
+        evaluate: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        self.logits = self.f_net(state)
+        template_one_hot, _template_types = apply_td3_template_mask(
+            self.logits, template_mask_info, temperature=temperature, evaluate=evaluate
+        )
+        r2_vector = state.new_zeros(state.size(0), 0)
+        return template_one_hot, r2_vector
 
 
 class CriticNetwork(nn.Module):
@@ -117,4 +147,6 @@ class CriticNetwork(nn.Module):
                 nn.init.kaiming_uniform_(layer.weight, nonlinearity="relu")
 
     def forward(self, state: torch.Tensor, template: torch.Tensor, r2_vector: torch.Tensor) -> torch.Tensor:
+        if r2_vector.shape[-1] == 0:
+            return self.network(torch.cat([state, template], dim=-1))
         return self.network(torch.cat([state, template, r2_vector], dim=-1))

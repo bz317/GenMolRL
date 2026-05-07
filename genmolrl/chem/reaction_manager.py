@@ -41,6 +41,7 @@ class ReactionManager:
         return out
 
     def templates_for_mode(self, reaction_mode: str) -> dict[int, dict[str, Any]]:
+        """``uni``: only UNI_TYPES templates. ``bi``: full pool (uni + bi templates together)."""
         if reaction_mode == "bi":
             return dict(self.templates)
         if reaction_mode != "uni":

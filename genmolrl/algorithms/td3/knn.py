@@ -68,8 +68,8 @@ class KNNWrapper(gym.ActionWrapper):
         k = min(k, int(knn_index.ntotal))
         if k <= 0:
             return template_index, None
-        query_vector = reactant_vector.cuda() if self.use_gpu else reactant_vector.cpu().numpy()
-        distances, indices = knn_index.search(query_vector, k)
+        query_np = reactant_vector.detach().cpu().numpy().astype(np.float32, copy=False).reshape(1, -1)
+        distances, indices = knn_index.search(query_np, k)
         valid_reactants = self.env.unwrapped.reaction_manager.get_valid_reactants(template_index)
         top_reactants = [valid_reactants[int(idx)] for idx in indices[0] if 0 <= int(idx) < len(valid_reactants)]
         if not top_reactants:

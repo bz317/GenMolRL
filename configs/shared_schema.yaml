@@ -1,7 +1,7 @@
 # Informal config schema for GenMolRL experiments.
 project: GenMolRL
 experiment_name: string
-reaction_mode: uni # uni | bi
+reaction_mode: uni # uni | bi (bi = full template pool: uni + bi templates)
 masking: substructure # substructure | reaction_valid | r2_available | none
 reward: delta_qed # delta_qed | final_qed
 max_episode_len: 5
@@ -14,7 +14,7 @@ dataset:
   fixed_start_smiles: null
 env:
   algorithm_family: sb3_discrete # sb3_discrete | sb3_multidiscrete | td3_pgfs
-  action_design: discrete # discrete | multidiscrete_factorized | pgfs_continuous_r2
+  action_design: discrete # discrete | multidiscrete_factorized | pgfs_continuous_r2 | td3_uni_discrete
   use_stop_action: true
   stop_early_penalty: 0.0
   stop_penalty_until_step: -1
@@ -31,6 +31,8 @@ ppo:
   target_kl: null
 td3:
   warmup_stop_probability: 0.1
+  save_replay_buffer_in_checkpoints: false
+  template_mask_kind: null # null: use YAML masking; else force mask kind for TD3 only
 search:
   max_paths: null
   max_attempts: null

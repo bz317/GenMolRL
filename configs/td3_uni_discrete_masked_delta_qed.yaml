@@ -1,0 +1,50 @@
+# =============================================================================
+# TD3 | uni templates | DISCRETE template-only action space (comparison baseline)
+# -----------------------------------------------------------------------------
+# Policy: template logits only; critic Q(s, template) with no R2 dimensions.
+# No KNNWrapper. Requires reaction_mode: uni.
+# Hyperparameters live here (including discrete vs continuous via env.action_design).
+# W&B run name / project: set in run_genmolrl_td3.sh (EXPERIMENT_NAME, WANDB_PROJECT).
+# Authoritative switch: env.action_design below (must be td3_uni_discrete).
+# =============================================================================
+reaction_mode: uni
+masking: reaction_valid
+reward: delta_qed
+max_episode_len: 5
+dataset:
+  training_file: data/Uni/reactants_train.pkl
+  test_file: data/Uni/reactants_test.pkl
+  templates_file: data/Uni/templates_unimolecolar_explicit.pkl
+  start_strategy: random_pool
+env:
+  algorithm_family: td3_pgfs
+  # Discrete uni TD3 (no continuous R2 head); must match header above.
+  action_design: td3_uni_discrete
+  use_stop_action: true
+  stop_early_penalty: 0.0
+  stop_penalty_until_step: -1
+  invalid_reaction_penalty: -1.0
+training:
+  seed: 42
+  total_timesteps: 1000000
+  start_timesteps: 10000
+  eval_freq: 10000
+  n_envs: 1
+td3:
+  actor_lr: 0.0001
+  critic_lr: 0.0003
+  gamma: 0.99
+  tau: 0.005
+  batch_size: 64
+  buffer_size: 500000
+  policy_freq: 2
+  policy_noise: 0.2
+  noise_std: 0.1
+  noise_clip: 0.2
+  initial_temperature: 1.0
+  min_temperature: 0.25
+  warmup_stop_probability: 0.1
+  save_replay_buffer_in_checkpoints: false
+callbacks:
+  model_save_freq: 100000
+  gradient_save_freq: 100
