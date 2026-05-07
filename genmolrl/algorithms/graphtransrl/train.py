@@ -86,6 +86,54 @@ class Trajectory:
         return float(max(self.qeds))
 
 
+class _BestTrajectoryReplayBuffer:
+    """Top-K best trajectories ever sampled, by stored ``total_reward``.
+
+    Stores the SMILES sequence so :class:`GraphTransRL.replay_trajectory` can
+    recompute log-probabilities under the current policy without re-running RDKit.
+    Duplicates are deduped via ``(start_smiles, tuple(actions))`` so the buffer
+    holds *distinct* high-reward modes.
+    """
+
+    def __init__(self, capacity: int):
+        self.capacity = int(capacity)
+        # entries are (total_reward, start_smiles, actions, smiles_sequence)
+        # sorted ascending by total_reward; index 0 is the lowest-reward entry.
+        self.entries: list[tuple[float, str, list, list]] = []
+        self._keys: set[tuple] = set()
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def push(self, total_reward: float, start_smiles: str, actions: list, smiles_sequence: list) -> bool:
+        if self.capacity <= 0:
+            return False
+        key = (start_smiles, tuple(actions))
+        if key in self._keys:
+            return False
+        if len(self.entries) < self.capacity:
+            self.entries.append((float(total_reward), str(start_smiles), list(actions), list(smiles_sequence)))
+            self._keys.add(key)
+            self.entries.sort(key=lambda e: e[0])
+            return True
+        if total_reward > self.entries[0][0]:
+            removed = self.entries.pop(0)
+            self._keys.discard((removed[1], tuple(removed[2])))
+            self.entries.append((float(total_reward), str(start_smiles), list(actions), list(smiles_sequence)))
+            self._keys.add(key)
+            self.entries.sort(key=lambda e: e[0])
+            return True
+        return False
+
+    def sample_one(self) -> tuple[float, str, list, list] | None:
+        if not self.entries:
+            return None
+        return random.choice(self.entries)
+
+    def top_reward(self) -> float:
+        return self.entries[-1][0] if self.entries else float("nan")
+
+
 class StartSampler:
     def __init__(self, train_smiles: list[str], test_smiles: list[str], seed: int):
         if not train_smiles:
@@ -147,8 +195,33 @@ class GraphTransRL:
         )
         self.log_z = torch.nn.Parameter(torch.tensor(float(method_cfg.get("init_log_z", 0.0)), device=self.device))
         self.optimizer.add_param_group({"params": [self.log_z], "lr": float(method_cfg.get("log_z_lr", 1e-3))})
+        # Optional epsilon-greedy template exploration with linear decay. Defaults
+        # preserve previous behavior: constant ``random_action_prob`` (0.0 by default).
         self.random_action_prob = float(method_cfg.get("random_action_prob", 0.0))
+        self.random_action_min_prob = float(
+            method_cfg.get("random_action_min_prob", self.random_action_prob)
+        )
+        self.random_action_decay_steps = int(method_cfg.get("random_action_decay_steps", 0))
+        self.current_global_step = 0
+        # Inverse temperature on the TB target (target = beta * log(R+1)). Default 1.0
+        # reproduces the original target. Higher beta sharpens toward high-R trajectories.
+        self.reward_beta = float(method_cfg.get("reward_beta", 1.0))
+        # Optional best-trajectory replay buffer. Disabled when capacity == 0.
+        self.replay_buffer = _BestTrajectoryReplayBuffer(
+            int(method_cfg.get("replay_buffer_size", 0))
+        )
+        self.replay_prob = float(method_cfg.get("replay_prob", 0.0))
         self.sampler = StartSampler(self.train_smiles, self.test_smiles, self.seed)
+
+    def _effective_random_action_prob(self) -> float:
+        if self.random_action_prob <= 0.0 or self.random_action_decay_steps <= 0:
+            return float(self.random_action_prob)
+        progress = self.current_global_step / float(self.random_action_decay_steps)
+        progress = max(0.0, min(1.0, progress))
+        return float(
+            self.random_action_prob
+            + (self.random_action_min_prob - self.random_action_prob) * progress
+        )
 
     def _action_mask(self, smiles: str) -> torch.Tensor:
         mask = torch.zeros(self.num_templates + 1, dtype=torch.bool, device=self.device)
@@ -167,12 +240,14 @@ class GraphTransRL:
     def _choose_action(self, logits: torch.Tensor, mask: torch.Tensor, *, greedy: bool) -> tuple[int, torch.Tensor]:
         if greedy:
             action = int(torch.argmax(logits).item())
-        elif self.random_action_prob > 0 and random.random() < self.random_action_prob:
-            valid = torch.where(mask)[0]
-            action = int(valid[torch.randint(len(valid), (1,), device=self.device)].item())
         else:
-            dist = torch.distributions.Categorical(logits=logits)
-            action = int(dist.sample().item())
+            eps = self._effective_random_action_prob()
+            if eps > 0.0 and random.random() < eps:
+                valid = torch.where(mask)[0]
+                action = int(valid[torch.randint(len(valid), (1,), device=self.device)].item())
+            else:
+                dist = torch.distributions.Categorical(logits=logits)
+                action = int(dist.sample().item())
         log_prob = F.log_softmax(logits, dim=-1)[action]
         return action, log_prob
 
@@ -224,18 +299,98 @@ class GraphTransRL:
                 forward_log_flows.append(self.log_z * 0.0)
             return traj, log_probs, forward_log_flows
 
+    def replay_trajectory(
+        self,
+        start_smiles: str,
+        actions: list,
+        smiles_sequence: list,
+        *,
+        track_grad: bool = True,
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        """Recompute log-pf and forward-log-flows for a fixed trajectory under the current policy.
+
+        Used by the best-trajectory replay buffer. The trajectory is faithful to
+        the original because the action mask only depends on the current SMILES
+        (deterministic), so each ``(action, current_smiles)`` pair is replayable.
+        If a stored action becomes infeasible (e.g., template pool changed), the
+        replay terminates early and the surviving prefix is used for the loss.
+        """
+        ctx = torch.enable_grad() if track_grad else torch.no_grad()
+        log_probs: list[torch.Tensor] = []
+        forward_log_flows: list[torch.Tensor] = []
+        with ctx:
+            for i, action in enumerate(actions):
+                if i >= len(smiles_sequence):
+                    break
+                current = smiles_sequence[i]
+                logits, mask = self._masked_logits(current)
+                if not bool(mask.any()):
+                    break
+                if isinstance(action, str) and action == STOP_ACTION:
+                    if not self.use_stop_action or not bool(mask[self.stop_index]):
+                        break
+                    log_prob = F.log_softmax(logits, dim=-1)[self.stop_index]
+                else:
+                    a = int(action)
+                    if a < 0 or a >= mask.numel() or not bool(mask[a]):
+                        break
+                    log_prob = F.log_softmax(logits, dim=-1)[a]
+                log_probs.append(log_prob)
+                forward_log_flows.append(torch.logsumexp(logits[mask], dim=0))
+            if not forward_log_flows:
+                forward_log_flows.append(self.log_z * 0.0)
+        return log_probs, forward_log_flows
+
     def train_step(self, starts: list[str]) -> dict[str, float]:
         self.policy.train()
         losses = []
-        rewards = []
-        lengths = []
+        rewards: list[float] = []
+        lengths: list[int] = []
+        replay_flags: list[float] = []
         for start in starts:
-            traj, log_probs, forward_log_flows = self.sample_trajectory(start, greedy=False, track_grad=True)
-            rewards.append(traj.total_reward)
-            lengths.append(traj.episode_len)
-            terminal_reward = max(1e-6, traj.total_reward + 1.0)
-            target = torch.tensor(math.log(terminal_reward), device=self.device)
-            log_pf = torch.stack(log_probs).sum() if log_probs else self.log_z * 0.0
+            replay_used = False
+            sampled_total_reward: float
+            sampled_episode_len: int
+            if (
+                self.replay_prob > 0.0
+                and len(self.replay_buffer) > 0
+                and random.random() < self.replay_prob
+            ):
+                entry = self.replay_buffer.sample_one()
+                if entry is not None:
+                    stored_reward, replay_start, replay_actions, replay_smiles = entry
+                    log_probs, forward_log_flows = self.replay_trajectory(
+                        replay_start, replay_actions, replay_smiles, track_grad=True
+                    )
+                    sampled_total_reward = float(stored_reward)
+                    sampled_episode_len = int(
+                        len([a for a in replay_actions if a != STOP_ACTION])
+                    )
+                    replay_used = True
+            if not replay_used:
+                traj, log_probs, forward_log_flows = self.sample_trajectory(
+                    start, greedy=False, track_grad=True
+                )
+                sampled_total_reward = float(traj.total_reward)
+                sampled_episode_len = int(traj.episode_len)
+                # Push fresh (on-policy) trajectory into the best-K buffer.
+                self.replay_buffer.push(
+                    traj.total_reward,
+                    traj.start_smiles,
+                    list(traj.actions),
+                    list(traj.smiles),
+                )
+
+            rewards.append(sampled_total_reward)
+            lengths.append(sampled_episode_len)
+            replay_flags.append(float(replay_used))
+            terminal_reward = max(1e-6, sampled_total_reward + 1.0)
+            target = torch.tensor(
+                self.reward_beta * math.log(terminal_reward), device=self.device
+            )
+            log_pf = (
+                torch.stack(log_probs).sum() if log_probs else self.log_z * 0.0
+            )
             flow_term = torch.stack(forward_log_flows).mean()
             losses.append((self.log_z + log_pf - target).pow(2) + 1e-3 * flow_term.pow(2))
         loss = torch.stack(losses).mean()
@@ -248,6 +403,11 @@ class GraphTransRL:
             "train/mean_reward": float(np.mean(rewards)),
             "train/mean_ep_length": float(np.mean(lengths)),
             "train/log_z": float(self.log_z.detach().cpu().item()),
+            "train/eps_random_action": self._effective_random_action_prob(),
+            "train/replay_fraction": float(np.mean(replay_flags)) if replay_flags else 0.0,
+            "train/replay_buffer_size": int(len(self.replay_buffer)),
+            "train/replay_buffer_top_reward": self.replay_buffer.top_reward(),
+            "train/reward_beta": float(self.reward_beta),
         }
 
     def evaluate(self) -> dict[str, float]:
@@ -291,6 +451,7 @@ def train(config: dict, experiment_name: str) -> None:
 
     best_eval = -float("inf")
     for global_step in range(1, total_steps + 1):
+        trainer.current_global_step = global_step
         starts = trainer.sampler.sample_train(batch_size)
         metrics = trainer.train_step(starts)
         metrics["train/global_step"] = global_step
