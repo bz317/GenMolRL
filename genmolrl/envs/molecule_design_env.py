@@ -178,13 +178,25 @@ class MoleculeDesignEnv(gym.Env):
         template_index, r2 = self._parse_action(action)
 
         if self.use_stop_action and template_index == self.num_templates:
+            feasible_count = int(
+                self.reaction_manager.get_mask(
+                    self.current_state, kind=self.mask_provider.mode
+                ).sum().item()
+            )
             reward = self.reward_fn.stop_reward(
                 current_step=self.current_step,
                 stop_early_penalty=self.stop_early_penalty,
                 stop_penalty_until_step=self.stop_penalty_until_step,
+                feasible_template_count=feasible_count,
             )
             info = self._get_info()
-            info.update({"stop": True, "stop_reward": reward})
+            info.update(
+                {
+                    "stop": True,
+                    "stop_reward": reward,
+                    "stop_feasible_count": feasible_count,
+                }
+            )
             return self._get_obs(), reward, False, True, info
 
         template = self.templates.get(template_index)

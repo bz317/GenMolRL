@@ -47,7 +47,24 @@ class RewardFunction:
             return self._maybe_round(current_qed)
         return self._maybe_round(current_qed - self._qed(previous_smiles))
 
-    def stop_reward(self, *, current_step: int, stop_early_penalty: float, stop_penalty_until_step: int) -> float:
-        if stop_penalty_until_step > 0 and current_step <= stop_penalty_until_step:
+    def stop_reward(
+        self,
+        *,
+        current_step: int,
+        stop_early_penalty: float,
+        stop_penalty_until_step: int,
+        feasible_template_count: int = 1,
+    ) -> float:
+        # Conditional Stop penalty: only charge the early-stop penalty when the
+        # agent actually had at least one feasible reaction template available
+        # but chose Stop anyway. If no template is feasible at this state, Stop
+        # is the only legal move and incurs no penalty. Default ``feasible_template_count=1``
+        # preserves the legacy unconditional behavior for callers that don't
+        # supply the flag.
+        if (
+            stop_penalty_until_step > 0
+            and current_step <= stop_penalty_until_step
+            and feasible_template_count > 0
+        ):
             return float(stop_early_penalty)
         return 0.0

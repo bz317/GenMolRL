@@ -20,12 +20,16 @@ env:
   algorithm_family: td3_pgfs
   # Continuous PGFS head (template + R2 vector); must match header above.
   action_design: pgfs_continuous_r2
-  # Stop action disabled for TD3 to remove the Q(stop)=0 plateau that traps
-  # the deterministic-greedy actor in PPO/A2C-style ΔQED settings; episodes
-  # end naturally on max_episode_len or when no feasible templates remain.
-  use_stop_action: false
-  stop_early_penalty: 0.0
-  stop_penalty_until_step: -1
+  # Stop is RE-ENABLED with a conditional early-stop penalty: the env charges
+  # ``stop_early_penalty`` at step <= ``stop_penalty_until_step`` ONLY when at
+  # least one feasible reaction template was available. If no template was
+  # feasible, Stop is free (the only legal action). This breaks the trivial
+  # Q(Stop)=0 plateau by making early voluntary Stop slightly negative while
+  # still letting forced Stops through cleanly. PPO/A2C/GraphTransRL keep
+  # ``stop_early_penalty=0.0`` so this knob is a pure no-op for them.
+  use_stop_action: true
+  stop_early_penalty: -0.02
+  stop_penalty_until_step: 1
   invalid_reaction_penalty: -1.0
 training:
   seed: 42
@@ -56,6 +60,16 @@ td3:
   training_random_action_prob: 0.3
   training_random_action_min_prob: 0.05
   training_random_action_decay_steps: 500000
+  # SAC-discrete-style soft actor-critic update. When true:
+  #   • Actor is a masked-softmax categorical (sampled at training time, argmax at eval).
+  #   • Loss = -(probs * (Q_all - alpha * log_probs)).sum(-1).mean() (entropy bonus).
+  #   • Critic target uses the soft Bellman backup E_{a~π}[Q' - alpha log π].
+  # When false the original deterministic-greedy / Gumbel-Softmax path is used.
+  # Restricted to reaction_mode=uni (entropy path assumes R2=0 for all actions).
+  entropy_regularization: true
+  # Entropy bonus weight. Larger alpha encourages broader policies; with
+  # ~80-100 templates, max entropy ≈ log(N) ≈ 4.5, so 0.1-0.3 is a sane range.
+  entropy_alpha: 0.2
   # Huge checkpoints if true (buffer_size tensors); enable only to resume exact replay state.
   save_replay_buffer_in_checkpoints: false
 callbacks:

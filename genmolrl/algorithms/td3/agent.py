@@ -41,6 +41,8 @@ class TD3Agent:
         start_timesteps=3000,
         max_timesteps=1000000,
         template_mask_kind: str | None = None,
+        entropy_regularization: bool = False,
+        entropy_alpha: float = 0.2,
     ):
         self.env = env
         self.state_dim = env.unwrapped.observation_space.shape[0]
@@ -77,6 +79,23 @@ class TD3Agent:
         self.critic_loss = None
         self._template_mask_kind_override = template_mask_kind
 
+        # Opt-in SAC-discrete-style soft actor-critic update. When enabled, the
+        # actor is treated as a categorical distribution (masked softmax),
+        # trained to maximize ``E_{a~π}[Q(s,a) - α log π(a|s)]``, and the
+        # critic uses a soft Bellman backup with the same entropy bonus.
+        # Restricted to ``reaction_mode == 'uni'`` since the all-actions Q
+        # evaluation assumes R2 = 0 for every action.
+        self.entropy_regularization = bool(entropy_regularization)
+        self.entropy_alpha = float(entropy_alpha)
+        if self.entropy_regularization:
+            reaction_mode = getattr(env.unwrapped, "reaction_mode", "uni")
+            if reaction_mode != "uni":
+                raise ValueError(
+                    "td3.entropy_regularization=True is only supported for reaction_mode=uni "
+                    "(the entropy path assumes R2=0 for every action). Set entropy_regularization=False "
+                    "for bi reactions."
+                )
+
     def _template_mask_info(self, smiles_batch):
         rm = self.env.unwrapped.reaction_manager
         mask_kind = td3_template_mask_kind(self.env, override=self._template_mask_kind_override)
@@ -102,16 +121,56 @@ class TD3Agent:
         if hasattr(self.env.unwrapped, "reaction_manager") and hasattr(self.env.unwrapped, "current_state"):
             mask_info = self._template_mask_info([self.env.unwrapped.current_state])
         self.actor.eval() if evaluate else self.actor.train()
+
+        # Entropy-regularized training-time sampling: draw a template from the
+        # masked softmax distribution. Eval still uses the original argmax path
+        # (so eval is a deterministic head-to-head against vanilla TD3).
+        if self.entropy_regularization and not evaluate and mask_info is not None:
+            with torch.no_grad():
+                logits = self.actor.f_net(state)
+                template_mask, _ = mask_info
+                masked_logits = logits + (1.0 - template_mask) * (-1e9)
+                probs = F.softmax(masked_logits, dim=-1)
+                template_idx = torch.distributions.Categorical(probs=probs).sample()
+                template_one_hot = F.one_hot(template_idx, num_classes=self.template_dim).float()
+                r2_vector = state.new_zeros(state.size(0), self.continuous_r2_dim)
+            return template_one_hot, r2_vector
+
         with torch.no_grad():
             template, r2_vector = self.actor(state, mask_info, self.temperature, evaluate=evaluate)
         if self.continuous_r2_dim > 0 and torch.any(r2_vector != 0) and not evaluate:
             r2_vector = r2_vector + torch.randn_like(r2_vector) * self.noise_std
         return template, r2_vector
 
+    def _q_all_actions(self, critic_net, state_obs: torch.Tensor) -> torch.Tensor:
+        """Return ``Q(s, e_i)`` for every template index ``i`` as ``(B, template_dim)``.
+
+        Assumes R2 = 0 for every action, which holds for ``reaction_mode='uni'``
+        (uni templates never use the R2 head). Used by the entropy-regularized
+        update to compute ``E_{a~π}[Q(s,a)]`` without a separate Q-head.
+        """
+        batch_size = state_obs.size(0)
+        n_actions = self.template_dim
+        state_rep = state_obs.unsqueeze(1).expand(-1, n_actions, -1).reshape(batch_size * n_actions, -1)
+        eye = torch.eye(n_actions, device=state_obs.device, dtype=state_obs.dtype)
+        actions_rep = eye.unsqueeze(0).expand(batch_size, -1, -1).reshape(batch_size * n_actions, n_actions)
+        if self.continuous_r2_dim > 0:
+            r2_rep = state_obs.new_zeros(batch_size * n_actions, self.continuous_r2_dim)
+        else:
+            r2_rep = state_obs.new_zeros(batch_size * n_actions, 0)
+        q_flat = critic_net(state_rep, actions_rep, r2_rep)
+        return q_flat.reshape(batch_size, n_actions)
+
     def train(self, replay_buffer, batch_size=32):
         self.actor.train()
         self.critic1.train()
         self.critic2.train()
+        if self.entropy_regularization:
+            return self._train_entropy(replay_buffer, batch_size)
+        return self._train_deterministic(replay_buffer, batch_size)
+
+    def _train_deterministic(self, replay_buffer, batch_size: int) -> dict:
+        """Original TD3 update: deterministic-greedy actor, clipped target noise on R2."""
         self.total_it += 1
 
         (
@@ -173,6 +232,101 @@ class TD3Agent:
             "current_q_values": current_q1.mean().item(),
             "target_q_values": target_q.mean().item(),
             "temperature": self.temperature,
+            "entropy_regularization": 0.0,
+        }
+
+    def _train_entropy(self, replay_buffer, batch_size: int) -> dict:
+        """SAC-discrete-style soft actor-critic update.
+
+        Differences from the standard TD3 update:
+          • Actor as a masked-softmax categorical; trained to maximize
+            ``E_{a~π}[Q(s,a) - α log π(a|s)]`` (entropy bonus).
+          • Critic target is the soft Bellman backup
+            ``y = r + γ * E_{a~π_target}[min(Q1', Q2') - α log π_target(a|s')]``.
+          • Critics are still trained via MSE on the actually-sampled actions
+            from the replay buffer.
+
+        Restricted to uni reactions (R2 assumed zero for every action). Other
+        algorithms (PPO/A2C/GraphTransRL) are unaffected by this code path.
+        """
+        self.total_it += 1
+
+        (
+            state_smiles,
+            state_obs,
+            templates,
+            r2_vectors,
+            rewards,
+            next_state_smiles,
+            next_state_obs,
+            not_dones,
+        ) = replay_buffer.sample(batch_size)
+
+        template_mask, _ = self._template_mask_info(state_smiles)
+        next_template_mask, _ = self._template_mask_info(next_state_smiles)
+
+        with torch.no_grad():
+            next_logits = self.actor_target.f_net(next_state_obs)
+            next_masked_logits = next_logits + (1.0 - next_template_mask) * (-1e9)
+            next_log_probs = F.log_softmax(next_masked_logits, dim=-1)
+            next_probs = next_log_probs.exp()
+            # Replace -inf log_probs (masked-out actions) with 0 so they
+            # contribute 0 to the expectation (probs are also 0 there).
+            # Avoids NaN from 0 * (-inf).
+            next_log_probs_safe = torch.where(
+                next_template_mask.bool(), next_log_probs, torch.zeros_like(next_log_probs)
+            )
+            q1_next_all = self._q_all_actions(self.critic1_target, next_state_obs)
+            q2_next_all = self._q_all_actions(self.critic2_target, next_state_obs)
+            q_min_next = torch.min(q1_next_all, q2_next_all)
+            soft_v_next = (
+                next_probs * (q_min_next - self.entropy_alpha * next_log_probs_safe)
+            ).sum(dim=-1, keepdim=True)
+            target_q = rewards + not_dones * self.gamma * soft_v_next
+
+        current_q1 = self.critic1(state_obs, templates, r2_vectors)
+        current_q2 = self.critic2(state_obs, templates, r2_vectors)
+        self.critic_loss = F.mse_loss(current_q1, target_q) + F.mse_loss(current_q2, target_q)
+        self.critic_optimizer.zero_grad()
+        self.critic_loss.backward()
+        self.critic_optimizer.step()
+
+        policy_entropy_value = 0.0
+        if self.total_it % self.policy_freq == 0:
+            logits = self.actor.f_net(state_obs)
+            masked_logits = logits + (1.0 - template_mask) * (-1e9)
+            log_probs = F.log_softmax(masked_logits, dim=-1)
+            probs = log_probs.exp()
+            log_probs_safe = torch.where(
+                template_mask.bool(), log_probs, torch.zeros_like(log_probs)
+            )
+            q1_all = self._q_all_actions(self.critic1, state_obs)
+            actor_objective = (probs * (q1_all - self.entropy_alpha * log_probs_safe)).sum(dim=-1)
+            self.actor_loss = -actor_objective.mean()
+            self.actor_optimizer.zero_grad()
+            self.actor_loss.backward()
+            self.actor_optimizer.step()
+            self._update_target(self.critic1, self.critic1_target, self.tau)
+            self._update_target(self.critic2, self.critic2_target, self.tau)
+            self._update_target(self.actor, self.actor_target, self.tau)
+
+            with torch.no_grad():
+                policy_entropy_value = float(
+                    -(probs * log_probs_safe).sum(dim=-1).mean().item()
+                )
+
+        self.temperature = max(self.temperature_end, self.temperature * self.temperature_decay)
+
+        return {
+            "total_iterations": self.total_it,
+            "critic_loss": self.critic_loss.item(),
+            "actor_loss": self.actor_loss if self.actor_loss is None else self.actor_loss.item(),
+            "current_q_values": current_q1.mean().item(),
+            "target_q_values": target_q.mean().item(),
+            "temperature": self.temperature,
+            "entropy_regularization": 1.0,
+            "entropy_alpha": self.entropy_alpha,
+            "policy_entropy": policy_entropy_value,
         }
 
     def _update_target(self, source, target, tau):

@@ -185,6 +185,12 @@ def train(config: dict, experiment_name: str):
     r2_vec_dim = _td3_r2_vec_dim(env)
     mk = td3_cfg.get("template_mask_kind")
     template_mask_kind = mk if isinstance(mk, str) else None
+    # Opt-in SAC-discrete-style soft actor-critic update. Default False keeps
+    # existing TD3 runs untouched; setting ``td3.entropy_regularization=true``
+    # in the YAML switches to the entropy-regularized actor/critic loss.
+    entropy_regularization = bool(td3_cfg.get("entropy_regularization", False))
+    entropy_alpha = float(td3_cfg.get("entropy_alpha", 0.2))
+
     agent = TD3Agent(
         env,
         float(td3_cfg.get("actor_lr", 1e-4)),
@@ -200,6 +206,8 @@ def train(config: dict, experiment_name: str):
         int(train_cfg.get("start_timesteps", 10000)),
         int(train_cfg.get("total_timesteps", 1_000_000)),
         template_mask_kind=template_mask_kind,
+        entropy_regularization=entropy_regularization,
+        entropy_alpha=entropy_alpha,
     )
     replay_buffer = ReplayBuffer(
         env.unwrapped.observation_space.shape[0],
