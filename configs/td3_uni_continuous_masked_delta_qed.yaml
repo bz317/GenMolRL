@@ -67,14 +67,27 @@ td3:
   # When false the original deterministic-greedy / Gumbel-Softmax path is used.
   # Restricted to reaction_mode=uni (entropy path assumes R2=0 for all actions).
   entropy_regularization: true
-  # Entropy bonus weight. Uni mode has 15 templates + Stop = 16 actions, so the
-  # max categorical entropy is log(16) ≈ 2.77 nats. Per-step ΔQED is roughly
-  # ±0.04 and episodes are ≤5 steps, so |Q| typically lives in ~0.1-0.3. We pick
-  # alpha so that alpha * H_max is comparable to (not dominating) |Q|:
-  #   alpha=0.05 → bonus ≈ 0.14 (light; Q dominates quickly, may still collapse)
-  #   alpha=0.1  → bonus ≈ 0.28 (balanced; recommended starting point)
-  #   alpha=0.2  → bonus ≈ 0.55 (heavy; policy stays near uniform, Q can't pull it)
-  entropy_alpha: 0.1
+  # Entropy bonus weight. Picking alpha requires matching it to the Q-value
+  # scale of THIS task, not just to log(N_actions):
+  #   • ``eval/mean_reward`` is the trajectory-summed ΔQED per molecule. For
+  #     delta_qed reward the sum telescopes to QED(s_T) - QED(s_0), so PPO/A2C
+  #     hitting ~+0.04 means the mean *trajectory return* (and hence |Q|) is
+  #     of order 0.04, not per-step.
+  #   • ``masking: reaction_valid`` restricts the policy to feasible actions
+  #     only. Measured on 500 uni starts: mean N_feasible = 3.12 (templates +
+  #     Stop), so effective H_max ≈ log(3.12) ≈ 1.08 nats (not log(16)=2.77).
+  #
+  # Two sanity checks for alpha:
+  #   1) Cumulative bonus over horizon: alpha * H_typ * Σ γ^t
+  #        with γ=0.99, H_typ=1.08, len≤5 → alpha * 1.08 * 4.9 ≈ 5.3 * alpha.
+  #      For this to be comparable to |return|≈0.04 we want alpha ~ 0.005-0.02.
+  #   2) Boltzmann form at convergence: π*(a) ∝ exp(Q(a)/alpha).
+  #      With ΔQ between best and second-best ≈ 0.04:
+  #        alpha=0.01 → π(best) ≈ 0.98 (very sharp, light exploration)
+  #        alpha=0.02 → π(best) ≈ 0.88 (sharp; recommended starting point)
+  #        alpha=0.05 → π(best) ≈ 0.69 (broad; converged policy still mixes)
+  #        alpha=0.10 → π(best) ≈ 0.60 (too broad; Q gradient can't pull it)
+  entropy_alpha: 0.02
   # Huge checkpoints if true (buffer_size tensors); enable only to resume exact replay state.
   save_replay_buffer_in_checkpoints: false
 callbacks:
