@@ -20,14 +20,19 @@ env:
   algorithm_family: td3_pgfs
   # Continuous PGFS head (template + R2 vector); must match header above.
   action_design: pgfs_continuous_r2
-  use_stop_action: true
+  # Stop action disabled for TD3 to remove the Q(stop)=0 plateau that traps
+  # the deterministic-greedy actor in PPO/A2C-style ΔQED settings; episodes
+  # end naturally on max_episode_len or when no feasible templates remain.
+  use_stop_action: false
   stop_early_penalty: 0.0
   stop_penalty_until_step: -1
   invalid_reaction_penalty: -1.0
 training:
   seed: 42
   total_timesteps: 1000000
-  start_timesteps: 10000
+  # Larger purely-random warm-up so the replay buffer captures many templates
+  # per state before the actor/critic commit to a single mode.
+  start_timesteps: 200000
   eval_freq: 10000
   n_envs: 1
 td3:
@@ -41,9 +46,16 @@ td3:
   policy_noise: 0.2
   noise_std: 0.1
   noise_clip: 0.2
-  initial_temperature: 1.0
-  min_temperature: 0.25
-  warmup_stop_probability: 0.1
+  # Slower temperature decay keeps Gumbel-Softmax actually stochastic for
+  # most of training (instead of effectively argmax after a few percent).
+  initial_temperature: 2.0
+  min_temperature: 0.7
+  warmup_stop_probability: 0.0
+  # Epsilon-greedy template exploration after warmup; mirrors PPO/A2C's
+  # stochastic policy by mixing real random template choices into rollouts.
+  training_random_action_prob: 0.3
+  training_random_action_min_prob: 0.05
+  training_random_action_decay_steps: 500000
   # Huge checkpoints if true (buffer_size tensors); enable only to resume exact replay state.
   save_replay_buffer_in_checkpoints: false
 callbacks:

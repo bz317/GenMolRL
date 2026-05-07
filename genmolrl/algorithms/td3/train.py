@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import random
 
 import numpy as np
 import torch
@@ -213,6 +214,13 @@ def train(config: dict, experiment_name: str):
     save_freq = int(config["callbacks"].get("model_save_freq", 100000))
     eval_freq = int(train_cfg.get("eval_freq", 10000))
     warmup_stop_probability = float(td3_cfg.get("warmup_stop_probability", 0.1))
+    # Optional epsilon-greedy template exploration during the post-warmup phase.
+    # Defaults are 0/0/0 so existing TD3 runs and other algorithms are unaffected.
+    training_random_action_prob = float(td3_cfg.get("training_random_action_prob", 0.0))
+    training_random_action_min_prob = float(
+        td3_cfg.get("training_random_action_min_prob", training_random_action_prob)
+    )
+    training_random_action_decay_steps = int(td3_cfg.get("training_random_action_decay_steps", 0))
     save_replay_buffer_in_checkpoints = bool(td3_cfg.get("save_replay_buffer_in_checkpoints", False))
     checkpoint_dir = project_root() / "runs" / run.id / "td3_checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -266,9 +274,43 @@ def train(config: dict, experiment_name: str):
                     episode_len -= 1
                     break
             else:
-                if hasattr(env, "enable"):
-                    env.enable()
-                action = agent.get_action(state)
+                eps = training_random_action_prob
+                if training_random_action_decay_steps > 0 and training_random_action_prob > 0.0:
+                    progress = (steps_done - start_timesteps) / float(
+                        training_random_action_decay_steps
+                    )
+                    progress = max(0.0, min(1.0, progress))
+                    eps = (
+                        training_random_action_prob
+                        + (training_random_action_min_prob - training_random_action_prob) * progress
+                    )
+                use_random = eps > 0.0 and random.random() < eps
+                if use_random:
+                    if hasattr(env, "disable"):
+                        env.disable()
+                    try:
+                        action = select_random_action(
+                            env,
+                            info["SMILES"],
+                            stop_probability=0.0,
+                            template_mask_kind=template_mask_kind,
+                        )
+                    except NoValidActionError:
+                        steps_done -= 1
+                        episode_len -= 1
+                        break
+                else:
+                    if hasattr(env, "enable"):
+                        env.enable()
+                    action = agent.get_action(state)
+                wandb.log(
+                    {
+                        "train/global_step": steps_done,
+                        "train/eps_random_action": float(eps),
+                        "train/used_random_action": float(use_random),
+                    },
+                    step=steps_done,
+                )
             next_state, reward, terminated, truncated, next_info = env.step(action)
             done = bool(terminated or truncated)
             replay_buffer.add(
