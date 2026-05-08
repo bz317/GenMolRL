@@ -190,6 +190,19 @@ def train(config: dict, experiment_name: str):
     # in the YAML switches to the entropy-regularized actor/critic loss.
     entropy_regularization = bool(td3_cfg.get("entropy_regularization", False))
     entropy_alpha = float(td3_cfg.get("entropy_alpha", 0.2))
+    # Optional automatic alpha tuning. When True, ``entropy_alpha`` is the
+    # initial value of a learnable alpha and ``target_entropy`` is the
+    # per-state entropy the tuner aims for (good default ≈ 0.5-0.6 nats for
+    # uni mode where mean log(N_feasible) ≈ 1.08).
+    auto_tune_alpha = bool(td3_cfg.get("auto_tune_alpha", False))
+    target_entropy = float(td3_cfg.get("target_entropy", 0.5))
+    # When set, per-state target = target_entropy_ratio * log(N_feasible(s)),
+    # which scales the entropy budget with the per-state action count and is
+    # the recommended path for masked discrete tasks. When None/null in the
+    # YAML, the agent falls back to the fixed-nats ``target_entropy`` above.
+    _ratio_cfg = td3_cfg.get("target_entropy_ratio", None)
+    target_entropy_ratio = None if _ratio_cfg is None else float(_ratio_cfg)
+    alpha_lr = float(td3_cfg.get("alpha_lr", 3e-4))
 
     agent = TD3Agent(
         env,
@@ -208,6 +221,10 @@ def train(config: dict, experiment_name: str):
         template_mask_kind=template_mask_kind,
         entropy_regularization=entropy_regularization,
         entropy_alpha=entropy_alpha,
+        auto_tune_alpha=auto_tune_alpha,
+        target_entropy=target_entropy,
+        target_entropy_ratio=target_entropy_ratio,
+        alpha_lr=alpha_lr,
     )
     replay_buffer = ReplayBuffer(
         env.unwrapped.observation_space.shape[0],

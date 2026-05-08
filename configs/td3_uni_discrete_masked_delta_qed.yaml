@@ -23,13 +23,18 @@ env:
   # Stop is RE-ENABLED with a conditional early-stop penalty: the env charges
   # ``stop_early_penalty`` at step <= ``stop_penalty_until_step`` ONLY when at
   # least one feasible reaction template was available. If no template was
-  # feasible, Stop is free (the only legal action). This breaks the trivial
-  # Q(Stop)=0 plateau by making early voluntary Stop slightly negative while
-  # still letting forced Stops through cleanly. PPO/A2C/GraphTransRL keep
+  # feasible, Stop is free (the only legal action). PPO/A2C/GraphTransRL keep
   # ``stop_early_penalty=0.0`` so this knob is a pure no-op for them.
+  #
+  # Tuned after observing that runs 8i1je84p (discrete) and hb0g7wim
+  # (continuous) collapsed to eval/stop_rate=1.0 with the previous
+  # (-0.02 @ step 1) setting: the penalty was too small and only fired once,
+  # so once Q(template) ≤ -0.02 anywhere, Stop locked in. Bump magnitude and
+  # extend the window to make voluntary Stop unattractive whenever templates
+  # were available. max_episode_len=5 so step 5 is forced-stop anyway.
   use_stop_action: true
-  stop_early_penalty: -0.02
-  stop_penalty_until_step: 1
+  stop_early_penalty: -0.05
+  stop_penalty_until_step: 4
   invalid_reaction_penalty: -1.0
 training:
   seed: 42
@@ -67,27 +72,33 @@ td3:
   # When false the original deterministic-greedy / Gumbel-Softmax path is used.
   # Restricted to reaction_mode=uni (entropy path assumes R2=0 for all actions).
   entropy_regularization: true
-  # Entropy bonus weight. Picking alpha requires matching it to the Q-value
-  # scale of THIS task, not just to log(N_actions):
-  #   • ``eval/mean_reward`` is the trajectory-summed ΔQED per molecule. For
-  #     delta_qed reward the sum telescopes to QED(s_T) - QED(s_0), so PPO/A2C
-  #     hitting ~+0.04 means the mean *trajectory return* (and hence |Q|) is
-  #     of order 0.04, not per-step.
-  #   • ``masking: reaction_valid`` restricts the policy to feasible actions
-  #     only. Measured on 500 uni starts: mean N_feasible = 3.12 (templates +
-  #     Stop), so effective H_max ≈ log(3.12) ≈ 1.08 nats (not log(16)=2.77).
-  #
-  # Two sanity checks for alpha:
-  #   1) Cumulative bonus over horizon: alpha * H_typ * Σ γ^t
-  #        with γ=0.99, H_typ=1.08, len≤5 → alpha * 1.08 * 4.9 ≈ 5.3 * alpha.
-  #      For this to be comparable to |return|≈0.04 we want alpha ~ 0.005-0.02.
-  #   2) Boltzmann form at convergence: π*(a) ∝ exp(Q(a)/alpha).
-  #      With ΔQ between best and second-best ≈ 0.04:
-  #        alpha=0.01 → π(best) ≈ 0.98 (very sharp, light exploration)
-  #        alpha=0.02 → π(best) ≈ 0.88 (sharp; recommended starting point)
-  #        alpha=0.05 → π(best) ≈ 0.69 (broad; converged policy still mixes)
-  #        alpha=0.10 → π(best) ≈ 0.60 (too broad; Q gradient can't pull it)
-  entropy_alpha: 0.02
+  # Initial entropy bonus weight. With auto-tuning enabled below this becomes
+  # the *starting* value of a learnable alpha; without auto-tuning it is the
+  # fixed value used throughout training. Bumped from 0.02 → 0.1 after the
+  # 0.02 default collapsed both runs (8i1je84p, hb0g7wim) to eval/stop_rate=1
+  # because tiny Q-gaps drove the Boltzmann optimum to argmax within the
+  # first ~100 actor updates. With α=0.1 and ΔQ=0.04 the converged Boltzmann
+  # gives π(best) ≈ 0.6 — broad enough to keep exploring template Q-values.
+  entropy_alpha: 0.1
+  # Automatic SAC-discrete alpha tuning. When true, alpha self-adjusts each
+  # actor update so that the policy entropy stays near ``target_entropy``:
+  #   alpha_loss = alpha * (H_actual.detach() - target_entropy)
+  # so log_alpha grows when entropy is below target and shrinks when above.
+  # Robust to the actual Q-value scale (which the fixed-alpha path is not).
+  # Setting to false reverts to the fixed ``entropy_alpha`` value above.
+  auto_tune_alpha: true
+  # Per-state entropy target as a fraction of each state's H_max:
+  #   H_target(s) = target_entropy_ratio * log(N_feasible(s))
+  # This scales the constraint with how many actions the state actually has
+  # — important here because ~40% of uni starts only offer 2 feasible
+  # actions (binary Stop-vs-react), where a fixed-nats target near log(2)=0.69
+  # forces the policy to stay near uniform. With ratio=0.5 the agent keeps
+  # a 50% exploration cushion on every state, regardless of N_feasible.
+  # Set to null to fall back to the fixed-nats ``target_entropy`` below.
+  target_entropy_ratio: 0.5
+  # Fallback fixed-nats target used only when target_entropy_ratio is null.
+  target_entropy: 0.6
+  alpha_lr: 0.0003
   save_replay_buffer_in_checkpoints: false
 callbacks:
   model_save_freq: 100000

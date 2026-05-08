@@ -43,6 +43,10 @@ class TD3Agent:
         template_mask_kind: str | None = None,
         entropy_regularization: bool = False,
         entropy_alpha: float = 0.2,
+        auto_tune_alpha: bool = False,
+        target_entropy: float = 0.5,
+        target_entropy_ratio: float | None = None,
+        alpha_lr: float = 3e-4,
     ):
         self.env = env
         self.state_dim = env.unwrapped.observation_space.shape[0]
@@ -95,6 +99,38 @@ class TD3Agent:
                     "(the entropy path assumes R2=0 for every action). Set entropy_regularization=False "
                     "for bi reactions."
                 )
+
+        # Optional automatic alpha tuning (SAC-discrete style). When enabled,
+        # ``alpha`` becomes a learnable parameter that adjusts every actor
+        # update to keep the policy entropy near ``target_entropy``. Initial
+        # alpha = ``entropy_alpha``. ``alpha`` always stays positive via the
+        # log-parameterization. When ``auto_tune_alpha=False`` the agent uses
+        # the fixed ``entropy_alpha`` (original behavior).
+        #
+        # Two ways to specify the target entropy:
+        #   • ``target_entropy_ratio`` (preferred when set): a per-state target
+        #     ``H_target(s) = ratio * log(N_feasible(s))`` so the constraint
+        #     scales with how many actions the state actually offers. The
+        #     batch mean of these per-state targets is used in alpha_loss.
+        #     This avoids over-regularizing binary-choice states (where
+        #     log(2)=0.69 means a fixed-nats target near that value would
+        #     force the policy to stay near uniform on Stop-vs-react states).
+        #   • ``target_entropy`` (fallback when ratio is None): a single
+        #     scalar in nats applied as the global batch-mean target.
+        self.auto_tune_alpha = bool(auto_tune_alpha) and self.entropy_regularization
+        self.target_entropy = float(target_entropy)
+        self.target_entropy_ratio = (
+            None if target_entropy_ratio is None else float(target_entropy_ratio)
+        )
+        if self.auto_tune_alpha:
+            initial_log_alpha = math.log(max(self.entropy_alpha, 1e-8))
+            self.log_alpha = torch.nn.Parameter(
+                torch.tensor(initial_log_alpha, dtype=torch.float32, device=device)
+            )
+            self.alpha_optimizer = optim.Adam([self.log_alpha], lr=float(alpha_lr))
+        else:
+            self.log_alpha = None
+            self.alpha_optimizer = None
 
     def _template_mask_info(self, smiles_batch):
         rm = self.env.unwrapped.reaction_manager
@@ -265,6 +301,13 @@ class TD3Agent:
         template_mask, _ = self._template_mask_info(state_smiles)
         next_template_mask, _ = self._template_mask_info(next_state_smiles)
 
+        # ``alpha`` is either the fixed config value or a learnable parameter
+        # under auto-tuning. Treat it as a scalar tensor either way.
+        if self.auto_tune_alpha:
+            alpha = self.log_alpha.detach().exp()
+        else:
+            alpha = torch.tensor(self.entropy_alpha, device=state_obs.device, dtype=state_obs.dtype)
+
         with torch.no_grad():
             next_logits = self.actor_target.f_net(next_state_obs)
             next_masked_logits = next_logits + (1.0 - next_template_mask) * (-1e9)
@@ -280,7 +323,7 @@ class TD3Agent:
             q2_next_all = self._q_all_actions(self.critic2_target, next_state_obs)
             q_min_next = torch.min(q1_next_all, q2_next_all)
             soft_v_next = (
-                next_probs * (q_min_next - self.entropy_alpha * next_log_probs_safe)
+                next_probs * (q_min_next - alpha * next_log_probs_safe)
             ).sum(dim=-1, keepdim=True)
             target_q = rewards + not_dones * self.gamma * soft_v_next
 
@@ -292,6 +335,10 @@ class TD3Agent:
         self.critic_optimizer.step()
 
         policy_entropy_value = 0.0
+        alpha_loss_value = 0.0
+        # Default to fixed-nats target on non-actor-update steps. Overwritten
+        # below on actor-update steps when ``target_entropy_ratio`` is active.
+        effective_target_entropy = self.target_entropy
         if self.total_it % self.policy_freq == 0:
             logits = self.actor.f_net(state_obs)
             masked_logits = logits + (1.0 - template_mask) * (-1e9)
@@ -301,7 +348,7 @@ class TD3Agent:
                 template_mask.bool(), log_probs, torch.zeros_like(log_probs)
             )
             q1_all = self._q_all_actions(self.critic1, state_obs)
-            actor_objective = (probs * (q1_all - self.entropy_alpha * log_probs_safe)).sum(dim=-1)
+            actor_objective = (probs * (q1_all - alpha * log_probs_safe)).sum(dim=-1)
             self.actor_loss = -actor_objective.mean()
             self.actor_optimizer.zero_grad()
             self.actor_loss.backward()
@@ -311,12 +358,50 @@ class TD3Agent:
             self._update_target(self.actor, self.actor_target, self.tau)
 
             with torch.no_grad():
-                policy_entropy_value = float(
-                    -(probs * log_probs_safe).sum(dim=-1).mean().item()
+                entropy_per_state = -(probs * log_probs_safe).sum(dim=-1)
+                policy_entropy_value = float(entropy_per_state.mean().item())
+
+            # SAC-discrete alpha auto-tune: minimize ``alpha * (H - H_target)``
+            # so ∂L/∂log_alpha = α * (H_actual - H_target). When entropy is
+            # below target, gradient is negative and log_alpha increases (more
+            # entropy regularization). When above target, log_alpha decreases.
+            if self.auto_tune_alpha:
+                # Per-state target = ratio * log(N_feasible(s)) when the ratio
+                # knob is set; otherwise fall back to the fixed-nats target.
+                # The per-state form scales the entropy budget with how many
+                # actions each state actually has — important here because
+                # ~40% of uni starts have only 2 feasible actions (binary
+                # Stop-vs-react), where a fixed 0.6-nats target is too high.
+                if self.target_entropy_ratio is not None:
+                    n_feasible = template_mask.sum(dim=-1).clamp(min=1.0)
+                    target_per_state = self.target_entropy_ratio * n_feasible.log()
+                    target_for_loss = target_per_state.mean().detach()
+                else:
+                    target_for_loss = torch.tensor(
+                        self.target_entropy,
+                        device=entropy_per_state.device,
+                        dtype=entropy_per_state.dtype,
+                    )
+                alpha_for_loss = self.log_alpha.exp()
+                alpha_loss = (
+                    alpha_for_loss
+                    * (entropy_per_state.detach().mean() - target_for_loss)
                 )
+                self.alpha_optimizer.zero_grad()
+                alpha_loss.backward()
+                self.alpha_optimizer.step()
+                alpha_loss_value = float(alpha_loss.detach().item())
+                effective_target_entropy = float(target_for_loss.item())
+            else:
+                effective_target_entropy = self.target_entropy
 
         self.temperature = max(self.temperature_end, self.temperature * self.temperature_decay)
 
+        current_alpha = (
+            float(self.log_alpha.detach().exp().item())
+            if self.auto_tune_alpha
+            else self.entropy_alpha
+        )
         return {
             "total_iterations": self.total_it,
             "critic_loss": self.critic_loss.item(),
@@ -325,7 +410,13 @@ class TD3Agent:
             "target_q_values": target_q.mean().item(),
             "temperature": self.temperature,
             "entropy_regularization": 1.0,
-            "entropy_alpha": self.entropy_alpha,
+            "entropy_alpha": current_alpha,
+            "auto_tune_alpha": 1.0 if self.auto_tune_alpha else 0.0,
+            "target_entropy": effective_target_entropy,
+            "target_entropy_ratio": (
+                self.target_entropy_ratio if self.target_entropy_ratio is not None else 0.0
+            ),
+            "alpha_loss": alpha_loss_value,
             "policy_entropy": policy_entropy_value,
         }
 
@@ -350,6 +441,9 @@ class TD3Agent:
             "steps_done": steps_done,
             "episode_count": episode_count,
         }
+        if self.auto_tune_alpha:
+            state_dict["log_alpha"] = float(self.log_alpha.detach().item())
+            state_dict["alpha_optimizer_state_dict"] = self.alpha_optimizer.state_dict()
         if include_replay_buffer:
             state_dict["replay_buffer"] = replay_buffer
         torch.save(state_dict, filename, pickle_protocol=5)
@@ -367,6 +461,13 @@ class TD3Agent:
         self.temperature = checkpoint.get("temperature", 1.0)
         self.actor_loss = checkpoint.get("actor_loss", None)
         self.critic_loss = checkpoint.get("critic_loss", None)
+        if self.auto_tune_alpha and "log_alpha" in checkpoint:
+            with torch.no_grad():
+                self.log_alpha.copy_(
+                    torch.tensor(float(checkpoint["log_alpha"]), device=self.log_alpha.device, dtype=self.log_alpha.dtype)
+                )
+            if "alpha_optimizer_state_dict" in checkpoint:
+                self.alpha_optimizer.load_state_dict(checkpoint["alpha_optimizer_state_dict"])
         return checkpoint.get("steps_done", 0), checkpoint.get("episode_count", 0), checkpoint.get("replay_buffer")
 
     def load_model(self, filename):
