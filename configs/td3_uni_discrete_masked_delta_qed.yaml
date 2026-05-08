@@ -6,10 +6,24 @@
 # Hyperparameters live here (including discrete vs continuous via env.action_design).
 # W&B run name / project: set in run_genmolrl_td3_discrete.sh (EXPERIMENT_NAME, WANDB_PROJECT).
 # Authoritative switch: env.action_design below (must be td3_uni_discrete).
+#
+# NOTE: filename still says "delta_qed" for shell-script compatibility, but the
+# reward type is now ``final_qed`` (see ``reward:`` below). The switch was made
+# after pthux4sd/8i1je84p/hb0g7wim all collapsed to eval/stop_rate=1.0 under
+# delta_qed: with delta_qed, Q(Stop) ≈ 0 sits in the middle of the per-template
+# Q distribution (templates with ΔQED<0 are below, those with ΔQED>0 are above),
+# and TD3's deterministic-greedy actor argmax-collapses globally to Stop on
+# every state. With final_qed, Q(template) ≈ QED(s') + γ·V(s') is on the order
+# of the molecule's cumulative drug-likeness (~1-3), while Q(Stop)=0 stays
+# pinned to zero. The Q-gap is ~1-3 in magnitude instead of ~0.05, so even
+# averaged across states the actor's logit ranking can no longer prefer Stop.
 # =============================================================================
 reaction_mode: uni
 masking: reaction_valid
-reward: delta_qed
+# Reward type. ``final_qed`` returns QED(s_{t+1}) at every successful template
+# step and 0 when Stop is selected. PPO/A2C/GraphTransRL kept ``delta_qed`` in
+# their own YAMLs; this change is local to the TD3 configs.
+reward: final_qed
 max_episode_len: 5
 dataset:
   training_file: data/Uni/reactants_train.pkl
@@ -20,21 +34,15 @@ env:
   algorithm_family: td3_pgfs
   # Discrete uni TD3 (no continuous R2 head); must match header above.
   action_design: td3_uni_discrete
-  # Stop is RE-ENABLED with a conditional early-stop penalty: the env charges
-  # ``stop_early_penalty`` at step <= ``stop_penalty_until_step`` ONLY when at
-  # least one feasible reaction template was available. If no template was
-  # feasible, Stop is free (the only legal action). PPO/A2C/GraphTransRL keep
-  # ``stop_early_penalty=0.0`` so this knob is a pure no-op for them.
-  #
-  # Tuned after observing that runs 8i1je84p (discrete) and hb0g7wim
-  # (continuous) collapsed to eval/stop_rate=1.0 with the previous
-  # (-0.02 @ step 1) setting: the penalty was too small and only fired once,
-  # so once Q(template) ≤ -0.02 anywhere, Stop locked in. Bump magnitude and
-  # extend the window to make voluntary Stop unattractive whenever templates
-  # were available. max_episode_len=5 so step 5 is forced-stop anyway.
+  # Conditional early-stop penalty is DISABLED under ``final_qed``: with
+  # Q(template) on the order of ~1-3 (cumulative future QED) and Q(Stop)=0,
+  # voluntary Stop is already enormously dominated; the penalty machinery is
+  # superfluous. ``stop_penalty_until_step <= 0`` keeps the conditional branch
+  # in rewards.stop_reward inert (returns 0). Code path is preserved for
+  # delta_qed YAMLs of other algorithms / future experiments.
   use_stop_action: true
-  stop_early_penalty: -0.05
-  stop_penalty_until_step: 4
+  stop_early_penalty: 0.0
+  stop_penalty_until_step: -1
   invalid_reaction_penalty: -1.0
 training:
   seed: 42
@@ -72,13 +80,12 @@ td3:
   # When false the original deterministic-greedy / Gumbel-Softmax path is used.
   # Restricted to reaction_mode=uni (entropy path assumes R2=0 for all actions).
   entropy_regularization: true
-  # Initial entropy bonus weight. With auto-tuning enabled below this becomes
-  # the *starting* value of a learnable alpha; without auto-tuning it is the
-  # fixed value used throughout training. Bumped from 0.02 → 0.1 after the
-  # 0.02 default collapsed both runs (8i1je84p, hb0g7wim) to eval/stop_rate=1
-  # because tiny Q-gaps drove the Boltzmann optimum to argmax within the
-  # first ~100 actor updates. With α=0.1 and ΔQ=0.04 the converged Boltzmann
-  # gives π(best) ≈ 0.6 — broad enough to keep exploring template Q-values.
+  # Initial entropy bonus weight. With auto-tuning enabled below this is just
+  # the *starting* value of a learnable alpha. Under final_qed the typical
+  # Q-gap is on the order of ~1 (cumulative future QED), so the Boltzmann
+  # would collapse to argmax at α=0.1; we rely on auto-tune to bump α upward
+  # until the per-state target entropy is met (typical converged α should be
+  # closer to 0.5-1.0 — the auto-tune dashboard will confirm).
   entropy_alpha: 0.1
   # Automatic SAC-discrete alpha tuning. When true, alpha self-adjusts each
   # actor update so that the policy entropy stays near ``target_entropy``:
