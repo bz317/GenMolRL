@@ -25,17 +25,38 @@ import gymnasium as gym  # noqa: E402
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def _td3_fp_dim(env) -> int:
+    """Width of the morgan fingerprint that backs both observations and the
+    continuous R2 vector. Disentangled from ``observation_space.shape`` so the
+    R2 head stays at 1024 dims when the action mask gets appended to the obs.
+    """
+    base = getattr(env.unwrapped, "base_obs_dim", None)
+    if base is not None:
+        return int(base)
+    return int(env.unwrapped.observation_space.shape[0])
+
+
 def _td3_r2_vec_dim(env) -> int:
     if getattr(env.unwrapped, "action_design", "") == TD3_UNI_DISCRETE_ACTION_DESIGN:
         return 0
-    return int(env.unwrapped.observation_space.shape[0])
+    return _td3_fp_dim(env)
 
 
 def _make_td3_env(config: dict, *, eval_env: bool = False):
     register_envs()
     kwargs = env_kwargs(config, eval_env=eval_env)
     kwargs["algorithm_family"] = "td3_pgfs"
-    kwargs["append_action_mask_to_obs"] = False
+    # Append the per-step action mask to the observation, matching PPO/A2C.
+    # Without this, the TD3 actor's f_net only sees the morgan fingerprint and
+    # has to *infer* which templates are feasible from the fingerprint alone;
+    # the Stop slot is always feasible, so its logit gets gradient signal
+    # from every state in the batch while each template logit only gets
+    # signal from states where that template is feasible. Including the mask
+    # gives the actor explicit per-state feasibility, the same input PPO/A2C
+    # already get. The continuous R2 head still emits a 1024-dim fingerprint
+    # vector (see ``_td3_fp_dim``) so this change does not affect the R2
+    # storage / KNN logic for bi reactions.
+    kwargs["append_action_mask_to_obs"] = True
     env = gym.make(ENV_ID, **kwargs)
     if getattr(env.unwrapped, "action_design", "") == TD3_UNI_DISCRETE_ACTION_DESIGN:
         return env
@@ -48,7 +69,7 @@ def _to_r2_tensor(env, r2):
     if isinstance(r2, torch.Tensor):
         return r2
     if r2 is None:
-        return torch.zeros((1, env.unwrapped.observation_space.shape[0]), device=device)
+        return torch.zeros((1, _td3_fp_dim(env)), device=device)
     return torch.tensor(env.unwrapped.reactants[r2], dtype=torch.float32, device=device).unsqueeze(0)
 
 

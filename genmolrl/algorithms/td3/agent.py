@@ -49,16 +49,25 @@ class TD3Agent:
         alpha_lr: float = 3e-4,
     ):
         self.env = env
+        # ``state_dim`` is the size of what the actor / critic *see* as an
+        # observation. With ``append_action_mask_to_obs=True`` (now the
+        # default for TD3, matching PPO/A2C) this is morgan_fp + action_mask.
         self.state_dim = env.unwrapped.observation_space.shape[0]
         self.template_dim = env.unwrapped.action_space.n
-        obs_dim = env.unwrapped.observation_space.shape[0]
+        # ``fingerprint_dim`` is the morgan-FP width itself (1024). It is used
+        # for the continuous R2 head (which outputs a fingerprint-shaped vector
+        # of the second reactant) and is decoupled from ``state_dim`` so that
+        # appending the action mask to the observation does NOT inflate the
+        # R2 vector. Falls back to obs dim for any env that doesn't expose
+        # ``base_obs_dim`` (back-compat).
+        fingerprint_dim = int(getattr(env.unwrapped, "base_obs_dim", self.state_dim))
         self.discrete_uni = getattr(env.unwrapped, "action_design", "") == TD3_UNI_DISCRETE_ACTION_DESIGN
-        self.continuous_r2_dim = 0 if self.discrete_uni else obs_dim
+        self.continuous_r2_dim = 0 if self.discrete_uni else fingerprint_dim
 
         if self.discrete_uni:
             self.actor = ActorNetworkUniDiscrete(self.state_dim, self.template_dim).to(device)
         else:
-            self.actor = ActorNetwork(self.state_dim, self.template_dim, obs_dim).to(device)
+            self.actor = ActorNetwork(self.state_dim, self.template_dim, fingerprint_dim).to(device)
         self.actor_target = deepcopy(self.actor)
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=actor_lr)
         self.critic1 = CriticNetwork(self.state_dim, self.template_dim, self.continuous_r2_dim).to(device)

@@ -215,23 +215,22 @@ TEMPLATE_FILE=data/Uni/templates_unimolecolar_explicit.pkl \
 
 `td3` trains the custom PGFS-style TD3 implementation. It learns a template selector plus a continuous R2 vector for bimolecular reactions.
 
-#### Uni `delta_qed` convergence ceiling and the move to `final_qed`
+#### Uni `delta_qed` convergence ceiling — diagnosis & fix history
 
 On the Uni `delta_qed` benchmark with the standard 12,689-molecule test set
 (`mean_start_qed ≈ 0.693`), TD3 reproducibly plateaus at
 `eval/mean_final_delta_qed ≈ -0.018` (Stop disabled) or collapses to
 `eval/stop_rate = 1.0` (Stop enabled), while PPO/A2C reach roughly `+0.04`
-on the same benchmark. The gap is structural rather than a hyperparameter
-problem.
+on the same benchmark.
 
-##### Diagnosis
+##### High-level diagnosis
 
 - TD3 is a deterministic-greedy actor that selects `argmax_a Q(s, a)` at
   evaluation time. With `reward: delta_qed`, average reactions on
   already-drug-like starts are slightly negative, so:
-    - with Stop available, `Q(Stop) ≈ 0` is an unbeatable plateau on most
-      states and the actor collapses to "always Stop"
-      (`eval/stop_rate = 1`, `eval/mean_reward = 0`);
+    - with Stop available, `Q(Stop) ≈ 0` sits in the middle of the
+      per-template Q distribution and the actor's argmax collapses to
+      "always Stop" (`eval/stop_rate = 1`, `eval/mean_reward = 0`);
     - with Stop disabled, the actor must react even on starts where every
       valid template lowers QED, so `eval/mean_final_delta_qed` is
       anchored by the ~60 % of starts whose best template is still
@@ -239,10 +238,9 @@ problem.
 - PPO/A2C avoid both traps with a stochastic categorical policy plus a
   value baseline: their gradient amplifies above-baseline templates
   *relative to the value baseline*, and a per-state nuanced "Stop on
-  high-QED, react on low-QED" policy emerges naturally. A deterministic
-  Q-greedy actor cannot represent that without algorithmic changes.
+  high-QED, react on low-QED" policy emerges naturally.
 
-##### Things tried under `delta_qed` (and why they did not break the ceiling)
+##### Things tried under `delta_qed` (and why they did not break the ceiling on their own)
 
 - ε-greedy template injection during training rollouts
   (`td3.training_random_action_prob` decaying 0.3 → 0.05 over 500k
@@ -260,49 +258,56 @@ problem.
   but apply `stop_early_penalty` only when feasible reactions existed at
   the time Stop was selected. The penalty was driven up to `-0.05`
   applied at every step `≤ 4` of the 5-step episode (run `pthux4sd`).
-  Did not help: the bootstrap loop drags `V(s')` down by roughly the
-  same magnitude as `Q(Stop)`, so the actor's argmax still globally
-  prefers Stop.
+  Did not help on its own: the bootstrap loop drags `V(s')` down by
+  roughly the same magnitude as `Q(Stop)`, so the actor's argmax still
+  globally prefers Stop. Code path is preserved (see
+  `rewards.stop_reward`) but disabled by default in the YAMLs.
 - **Entropy regularization** of the actor (SAC-discrete style with
   `entropy_regularization: true`), with **auto-tuned α** and a
   **per-state target entropy ratio** (`target_entropy_ratio = 0.5`,
   i.e. `H_target(s) = 0.5 · log N_feasible(s)`). Auto-tune kept policy
   entropy to within ±0.01 of target throughout training, but the actor's
   *argmax* (the eval policy) still picked Stop on 99.97 % of states —
-  template logits stayed below Stop globally. See run `pthux4sd` for the
-  full trajectory.
+  template logits stayed below Stop globally (run `pthux4sd`).
+- **`reward: final_qed`** as a structural workaround (run `2va9u7gz`):
+  cumulative-QED rewards remove the "Stop is the easy default" trap by
+  making `Q(template)` ~1–3 vs `Q(Stop) = 0`, but introduce the
+  *opposite* failure mode — the agent always reacts even when every
+  available template lowers QED, because every successful template step
+  emits positive reward. `mean_final_delta_qed` got worse, not better
+  (-0.06 vs random's -0.022 baseline). Reverted.
 
-The fundamental reason none of these break the ceiling: under `delta_qed`,
-`Q(Stop) ≈ 0` and per-template Q values cluster within `±0.05` of each
-other, so on any individual state the Q-gap between Stop and the best
-template is on the order of the noise floor. The actor's gradient,
-averaged across the batch, almost always tilts toward Stop because
-`Q(template) - Q(Stop) ≈ ΔQED + γ·V(s') - 0 ≈ ΔQED − 0.05` is negative on
-the majority of states. Forcing exploration at training time does not
-change the underlying logit ranking.
+##### Implementation audit (May 2026)
 
-##### Resolution: switching the TD3 reward to `final_qed`
+A systematic audit of `td3/agent.py`, `td3/train.py`,
+`td3/replay_buffer.py`, and `envs/molecule_design_env.py` did not find a
+correctness bug, but did identify two **structural asymmetries** with
+PPO/A2C that bias TD3 toward the always-Stop trap. Both are now fixed:
 
-`configs/td3_uni_*_masked_delta_qed.yaml` (filename kept for shell-script
-compatibility) now configure `reward: final_qed`. The conditional Stop
-penalty is disabled (`stop_early_penalty: 0.0`,
-`stop_penalty_until_step: -1`) because under `final_qed`:
+1. **TD3 observation now includes the action mask, matching PPO/A2C.**
+   Previously `algorithms/td3/train.py` hard-coded
+   `kwargs["append_action_mask_to_obs"] = False`, so the actor's `f_net`
+   only saw a 1024-dim Morgan fingerprint and had to *infer* which
+   templates were feasible at each state. The Stop slot is always
+   feasible, so its logit received gradient signal from every state in
+   the batch while each template logit only got signal from states where
+   that template was feasible — biasing the shared actor head toward
+   "Stop logit > all template logits" globally. The new flow appends the
+   16-dim mask to the observation (1024 → 1040 dims), matching PPO/A2C
+   exactly. The continuous R2 head is decoupled via
+   ``env.unwrapped.base_obs_dim`` so the second-reactant fingerprint
+   stays at 1024 dims (see `td3.train._td3_fp_dim`).
+2. **Replay buffer shrunk from 500k to 100k.** With
+   `start_timesteps=200k` warmup transitions and only one transition per
+   env step thereafter, a 500k buffer remains >80 % warmup-dominated for
+   most of training. 100k means the buffer fully transitions to
+   post-warmup samples within ~100k post-warmup steps so the actor sees
+   the consequences of its own behavior on the buffer composition more
+   quickly.
 
-- `Q(s, Stop) = 0` (Stop produces no reward).
-- `Q(s, template) ≈ QED(s') + γ·V(s')` is on the order of the molecule's
-  cumulative drug-likeness across the rest of the episode, i.e. ~1–3.
-
-The Q-gap between Stop and any feasible template is now ~1–3 (not ~0.05),
-so the actor's argmax can no longer collapse to Stop globally. The policy
-still has to learn *which* template to take per state, which the entropy
-regularization + auto-tuned α path is designed to support.
-
-Note that this changes the optimization target: under `final_qed` we
-maximize cumulative QED across the trajectory rather than the per-episode
-ΔQED. PPO/A2C, GraphTransRL, and the search baselines keep their
-`reward: delta_qed` configuration. The TD3 vs. PPO/A2C numbers on
-`eval/mean_final_delta_qed` (which is logged regardless of reward type)
-remain comparable across runs.
+PPO/A2C, GraphTransRL, and the search baselines are unaffected (the obs
+change lives entirely in `td3.train._make_td3_env`; the buffer change
+lives entirely in the TD3 YAMLs). Reward type is back to `delta_qed`.
 
 ### GraphTransRL
 
@@ -613,17 +618,18 @@ stop_penalty_until_step: 3
 
 For the PPO/A2C Uni compatibility configs, this matches the original experiments-branch setup: early Stop is allowed and has zero penalty.
 
-TD3 Uni now uses `reward: final_qed` (with `use_stop_action: true`). The
+TD3 Uni uses `reward: delta_qed` with `use_stop_action: true`. The
 conditional Stop penalty (`stop_early_penalty`, `stop_penalty_until_step`)
 is wired in `rewards.stop_reward` and `molecule_design_env.step` and only
 fires when `stop_penalty_until_step > 0`, `current_step <=
 stop_penalty_until_step`, *and* at least one feasible reaction template
-was available at that state. Under `final_qed` it is left disabled
-(`stop_early_penalty: 0.0`, `stop_penalty_until_step: -1`) because
-`Q(s, Stop) = 0` is already overwhelmingly dominated by `Q(s, template)`;
-the conditional code path remains in place for any future `delta_qed`
-TD3 experiment where it is needed. See "TD3/PGFS → Uni `delta_qed`
-convergence ceiling and the move to `final_qed`" for the full diagnosis.
+was available at that state. It is left **disabled by default**
+(`stop_early_penalty: 0.0`, `stop_penalty_until_step: -1`) in the TD3
+YAMLs while we evaluate the impact of the May 2026 audit fixes
+(action mask in observation, smaller replay buffer); the conditional
+code path remains in place for future experiments. See "TD3/PGFS → Uni
+`delta_qed` convergence ceiling — diagnosis & fix history" for the full
+write-up of every lever tried.
 
 `td3.warmup_stop_probability` is preserved for compatibility but is set
 to `0.0` in the current YAMLs so warmup samples templates exclusively

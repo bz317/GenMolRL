@@ -6,24 +6,17 @@
 # Hyperparameters live here (including discrete vs continuous via env.action_design).
 # W&B run name / project: set in run_genmolrl_td3_continuous.sh (EXPERIMENT_NAME, WANDB_PROJECT).
 # Authoritative switch: env.action_design below (must be pgfs_continuous_r2).
-#
-# NOTE: filename still says "delta_qed" for shell-script compatibility, but the
-# reward type is now ``final_qed`` (see ``reward:`` below). The switch was made
-# after pthux4sd/8i1je84p/hb0g7wim all collapsed to eval/stop_rate=1.0 under
-# delta_qed: with delta_qed, Q(Stop) ≈ 0 sits in the middle of the per-template
-# Q distribution (templates with ΔQED<0 are below, those with ΔQED>0 are above),
-# and TD3's deterministic-greedy actor argmax-collapses globally to Stop on
-# every state. With final_qed, Q(template) ≈ QED(s') + γ·V(s') is on the order
-# of the molecule's cumulative drug-likeness (~1-3), while Q(Stop)=0 stays
-# pinned to zero. The Q-gap is ~1-3 in magnitude instead of ~0.05, so even
-# averaged across states the actor's logit ranking can no longer prefer Stop.
 # =============================================================================
 reaction_mode: uni
 masking: reaction_valid
-# Reward type. ``final_qed`` returns QED(s_{t+1}) at every successful template
-# step and 0 when Stop is selected. PPO/A2C/GraphTransRL kept ``delta_qed`` in
-# their own YAMLs; this change is local to the TD3 configs.
-reward: final_qed
+# Reward type. ``delta_qed`` is the apples-to-apples objective vs PPO/A2C/
+# GraphTransRL (Q(template) = ΔQED + γ·V(s'), Q(Stop) = 0 or stop_early_penalty
+# encodes a per-state stop-vs-react decision). We previously experimented with
+# ``final_qed`` (run 2va9u7gz) but cumulative QED rewards push the agent to
+# always-react regardless of whether the reaction improves QED, and ΔQED
+# actually got worse (-0.06 vs random's -0.022). Reverted to delta_qed and now
+# focusing on diagnosing why TD3's actor still argmax-collapses to Stop here.
+reward: delta_qed
 max_episode_len: 5
 dataset:
   training_file: data/Uni/reactants_train.pkl
@@ -34,12 +27,10 @@ env:
   algorithm_family: td3_pgfs
   # Continuous PGFS head (template + R2 vector); must match header above.
   action_design: pgfs_continuous_r2
-  # Conditional early-stop penalty is DISABLED under ``final_qed``: with
-  # Q(template) on the order of ~1-3 (cumulative future QED) and Q(Stop)=0,
-  # voluntary Stop is already enormously dominated; the penalty machinery is
-  # superfluous. ``stop_penalty_until_step <= 0`` keeps the conditional branch
-  # in rewards.stop_reward inert (returns 0). Code path is preserved for
-  # delta_qed YAMLs of other algorithms / future experiments.
+  # Stop is enabled. The conditional Stop penalty (in rewards.stop_reward) is
+  # left inert here (stop_penalty_until_step <= 0) while we audit the actor /
+  # critic implementation for ``delta_qed`` correctness. PPO/A2C/GraphTransRL
+  # use the same neutral defaults so their behavior is unchanged.
   use_stop_action: true
   stop_early_penalty: 0.0
   stop_penalty_until_step: -1
@@ -58,7 +49,13 @@ td3:
   gamma: 0.99
   tau: 0.005
   batch_size: 64
-  buffer_size: 500000
+  # Smaller than the previous 500k. With start_timesteps=200k of warmup
+  # transitions and only ~1 transition per env step thereafter, a 500k buffer
+  # stays >80% warmup-dominated long after the actor has begun updating.
+  # 100k means the buffer fully transitions to post-warmup samples within
+  # ~100k post-warmup steps, so the actor sees the consequences of its own
+  # behavior on the buffer composition more quickly.
+  buffer_size: 100000
   policy_freq: 2
   policy_noise: 0.2
   noise_std: 0.1

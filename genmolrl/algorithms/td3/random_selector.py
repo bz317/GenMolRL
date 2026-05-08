@@ -19,6 +19,12 @@ class NoValidActionError(ValueError):
 def _continuous_r2_placeholder_dim(env) -> int:
     if getattr(env.unwrapped, "action_design", "") == TD3_UNI_DISCRETE_ACTION_DESIGN:
         return 0
+    # R2 is the fingerprint of the second reactant — fixed at the morgan-FP
+    # width (``base_obs_dim``), not the observation width (which now includes
+    # the appended action mask). Falls back to obs dim for legacy callers.
+    base = getattr(env.unwrapped, "base_obs_dim", None)
+    if base is not None:
+        return int(base)
     return int(env.unwrapped.observation_space.shape[0])
 
 
