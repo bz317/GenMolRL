@@ -47,10 +47,6 @@ class TD3Agent:
         target_entropy: float = 0.5,
         target_entropy_ratio: float | None = None,
         alpha_lr: float = 3e-4,
-        actor_hidden_dims: list[int] | None = None,
-        critic_hidden_dims: list[int] | None = None,
-        pi_hidden_dims: list[int] | None = None,
-        activation: str | None = None,
     ):
         self.env = env
         # ``state_dim`` is the size of what the actor / critic *see* as an
@@ -68,48 +64,14 @@ class TD3Agent:
         self.discrete_uni = getattr(env.unwrapped, "action_design", "") == TD3_UNI_DISCRETE_ACTION_DESIGN
         self.continuous_r2_dim = 0 if self.discrete_uni else fingerprint_dim
 
-        # Network width / activation are configurable so the agent can mirror
-        # PPO/A2C's SB3 default ``[64, 64]`` Tanh. The legacy defaults (used
-        # whenever the YAML does not specify them) preserve the original
-        # ``[256, 128, 128]`` ReLU actor / ``[256, 64, 16]`` ReLU critic so
-        # existing TD3 runs reproduce bit-for-bit.
-        self._actor_hidden_dims = list(actor_hidden_dims) if actor_hidden_dims is not None else None
-        self._critic_hidden_dims = list(critic_hidden_dims) if critic_hidden_dims is not None else None
-        self._pi_hidden_dims = list(pi_hidden_dims) if pi_hidden_dims is not None else None
-        self._activation = activation
-
         if self.discrete_uni:
-            self.actor = ActorNetworkUniDiscrete(
-                self.state_dim,
-                self.template_dim,
-                f_hidden_dims=self._actor_hidden_dims,
-                activation=self._activation,
-            ).to(device)
+            self.actor = ActorNetworkUniDiscrete(self.state_dim, self.template_dim).to(device)
         else:
-            self.actor = ActorNetwork(
-                self.state_dim,
-                self.template_dim,
-                fingerprint_dim,
-                f_hidden_dims=self._actor_hidden_dims,
-                pi_hidden_dims=self._pi_hidden_dims,
-                activation=self._activation,
-            ).to(device)
+            self.actor = ActorNetwork(self.state_dim, self.template_dim, fingerprint_dim).to(device)
         self.actor_target = deepcopy(self.actor)
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=actor_lr)
-        self.critic1 = CriticNetwork(
-            self.state_dim,
-            self.template_dim,
-            self.continuous_r2_dim,
-            hidden_dims=self._critic_hidden_dims,
-            activation=self._activation,
-        ).to(device)
-        self.critic2 = CriticNetwork(
-            self.state_dim,
-            self.template_dim,
-            self.continuous_r2_dim,
-            hidden_dims=self._critic_hidden_dims,
-            activation=self._activation,
-        ).to(device)
+        self.critic1 = CriticNetwork(self.state_dim, self.template_dim, self.continuous_r2_dim).to(device)
+        self.critic2 = CriticNetwork(self.state_dim, self.template_dim, self.continuous_r2_dim).to(device)
         self.critic1_target = deepcopy(self.critic1)
         self.critic2_target = deepcopy(self.critic2)
         self.critic_optimizer = optim.Adam(list(self.critic1.parameters()) + list(self.critic2.parameters()), lr=critic_lr)
@@ -356,18 +318,7 @@ class TD3Agent:
             alpha = torch.tensor(self.entropy_alpha, device=state_obs.device, dtype=state_obs.dtype)
 
         with torch.no_grad():
-            # Reference SAC-discrete (Christodoulou 2019, Algorithm 1) computes
-            # the soft V_next using the *current* actor's distribution (only
-            # the critic is target-Polyak-averaged). Using ``actor_target``
-            # here was a leftover from vanilla TD3's continuous-action target
-            # smoothing and produces a stale entropy bonus + distribution that
-            # lags ~1/τ steps behind the policy we are actually training. In
-            # the always-Stop basin this stale target keeps reinforcing
-            # ``Q(s', Stop)`` even when the current actor has started to move
-            # mass onto a template, which feeds back into the actor gradient
-            # and pulls it back toward Stop. Switching to the current actor
-            # aligns this branch with SAC-discrete and removes that bias.
-            next_logits = self.actor.f_net(next_state_obs)
+            next_logits = self.actor_target.f_net(next_state_obs)
             next_masked_logits = next_logits + (1.0 - next_template_mask) * (-1e9)
             next_log_probs = F.log_softmax(next_masked_logits, dim=-1)
             next_probs = next_log_probs.exp()

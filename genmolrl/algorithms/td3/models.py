@@ -1,42 +1,10 @@
-"""Neural networks for the self-contained PGFS-style TD3 trainer.
-
-Both width and activation are configurable so the agent can mirror PPO/A2C's
-SB3 default ``[64, 64]`` Tanh policy. The legacy defaults (``[256, 128, 128]``
-ReLU actor / ``[256, 64, 16]`` ReLU critic / ``[256, 256, 167]`` ReLU R2 head)
-are preserved so unconfigured callers reproduce the original behavior bit-for-bit.
-"""
+"""Neural networks for the self-contained PGFS-style TD3 trainer."""
 
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-
-_ACTIVATIONS: dict[str, type[nn.Module]] = {
-    "relu": nn.ReLU,
-    "tanh": nn.Tanh,
-    "leaky_relu": nn.LeakyReLU,
-    "gelu": nn.GELU,
-    "elu": nn.ELU,
-}
-
-
-def resolve_activation(activation) -> type[nn.Module]:
-    """Resolve a string / class into an ``nn.Module`` activation factory."""
-    if activation is None:
-        return nn.ReLU
-    if isinstance(activation, str):
-        key = activation.lower()
-        if key not in _ACTIVATIONS:
-            raise ValueError(
-                f"Unknown TD3 activation: {activation!r}. "
-                f"Choose from: {sorted(_ACTIVATIONS)}."
-            )
-        return _ACTIVATIONS[key]
-    if isinstance(activation, type) and issubclass(activation, nn.Module):
-        return activation
-    raise TypeError(f"Unsupported activation specifier: {activation!r}")
 
 
 def apply_td3_template_mask(
@@ -61,82 +29,54 @@ def apply_td3_template_mask(
 
 
 class FNetwork(nn.Module):
-    def __init__(
-        self,
-        input_dim: int,
-        output_dim: int,
-        hidden_dims: list[int] | None = None,
-        activation=None,
-    ):
+    def __init__(self, input_dim: int, output_dim: int, hidden_dims: list[int] | None = None):
         super().__init__()
         hidden_dims = hidden_dims or [256, 128, 128]
-        act_cls = resolve_activation(activation)
         layers: list[nn.Module] = []
         prev_dim = input_dim
         for hidden_dim in hidden_dims:
-            layers.extend([nn.Linear(prev_dim, hidden_dim), act_cls()])
+            layers.extend([nn.Linear(prev_dim, hidden_dim), nn.ReLU()])
             prev_dim = hidden_dim
         layers.append(nn.Linear(prev_dim, output_dim))
         self.network = nn.Sequential(*layers)
-        self._activation_cls = act_cls
         self._init_weights()
 
     def _init_weights(self) -> None:
-        nonlin = "relu" if self._activation_cls is nn.ReLU else "linear"
         for layer in self.network:
             if isinstance(layer, nn.Linear):
-                nn.init.kaiming_uniform_(layer.weight, nonlinearity=nonlin)
+                nn.init.kaiming_uniform_(layer.weight, nonlinearity="relu")
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         return self.network(state)
 
 
 class PiNetwork(nn.Module):
-    def __init__(
-        self,
-        input_dim: int,
-        output_dim: int,
-        hidden_dims: list[int] | None = None,
-        activation=None,
-    ):
+    def __init__(self, input_dim: int, output_dim: int, hidden_dims: list[int] | None = None):
         super().__init__()
         hidden_dims = hidden_dims or [256, 256, 167]
-        act_cls = resolve_activation(activation)
         layers: list[nn.Module] = []
         prev_dim = input_dim
         for hidden_dim in hidden_dims:
-            layers.extend([nn.Linear(prev_dim, hidden_dim), act_cls()])
+            layers.extend([nn.Linear(prev_dim, hidden_dim), nn.ReLU()])
             prev_dim = hidden_dim
         layers.append(nn.Linear(prev_dim, output_dim))
         self.network = nn.Sequential(*layers)
-        self._activation_cls = act_cls
         self._init_weights()
 
     def _init_weights(self) -> None:
-        nonlin = "relu" if self._activation_cls is nn.ReLU else "linear"
         for layer in self.network:
             if isinstance(layer, nn.Linear):
-                nn.init.kaiming_uniform_(layer.weight, nonlinearity=nonlin)
+                nn.init.kaiming_uniform_(layer.weight, nonlinearity="relu")
 
     def forward(self, combined_input: torch.Tensor) -> torch.Tensor:
         return torch.tanh(self.network(combined_input))
 
 
 class ActorNetwork(nn.Module):
-    def __init__(
-        self,
-        state_dim: int,
-        template_dim: int,
-        action_dim: int,
-        f_hidden_dims: list[int] | None = None,
-        pi_hidden_dims: list[int] | None = None,
-        activation=None,
-    ):
+    def __init__(self, state_dim: int, template_dim: int, action_dim: int):
         super().__init__()
-        self.f_net = FNetwork(state_dim, template_dim, hidden_dims=f_hidden_dims, activation=activation)
-        self.pi_net = PiNetwork(
-            state_dim + template_dim, action_dim, hidden_dims=pi_hidden_dims, activation=activation
-        )
+        self.f_net = FNetwork(state_dim, template_dim)
+        self.pi_net = PiNetwork(state_dim + template_dim, action_dim)
         self.logits: torch.Tensor | None = None
 
     def forward(
@@ -168,15 +108,9 @@ class ActorNetwork(nn.Module):
 class ActorNetworkUniDiscrete(nn.Module):
     """Uni-only TD3 actor: template logits only (no continuous R2 / Pi head)."""
 
-    def __init__(
-        self,
-        state_dim: int,
-        template_dim: int,
-        f_hidden_dims: list[int] | None = None,
-        activation=None,
-    ):
+    def __init__(self, state_dim: int, template_dim: int):
         super().__init__()
-        self.f_net = FNetwork(state_dim, template_dim, hidden_dims=f_hidden_dims, activation=activation)
+        self.f_net = FNetwork(state_dim, template_dim)
         self.logits: torch.Tensor | None = None
 
     def forward(
@@ -195,32 +129,22 @@ class ActorNetworkUniDiscrete(nn.Module):
 
 
 class CriticNetwork(nn.Module):
-    def __init__(
-        self,
-        state_dim: int,
-        template_dim: int,
-        r2_vec_dim: int,
-        hidden_dims: list[int] | None = None,
-        activation=None,
-    ):
+    def __init__(self, state_dim: int, template_dim: int, r2_vec_dim: int, hidden_dims: list[int] | None = None):
         super().__init__()
         hidden_dims = hidden_dims or [256, 64, 16]
-        act_cls = resolve_activation(activation)
         layers: list[nn.Module] = []
         prev_dim = state_dim + template_dim + r2_vec_dim
         for hidden_dim in hidden_dims:
-            layers.extend([nn.Linear(prev_dim, hidden_dim), act_cls()])
+            layers.extend([nn.Linear(prev_dim, hidden_dim), nn.ReLU()])
             prev_dim = hidden_dim
         layers.append(nn.Linear(prev_dim, 1))
         self.network = nn.Sequential(*layers)
-        self._activation_cls = act_cls
         self._init_weights()
 
     def _init_weights(self) -> None:
-        nonlin = "relu" if self._activation_cls is nn.ReLU else "linear"
         for layer in self.network:
             if isinstance(layer, nn.Linear):
-                nn.init.kaiming_uniform_(layer.weight, nonlinearity=nonlin)
+                nn.init.kaiming_uniform_(layer.weight, nonlinearity="relu")
 
     def forward(self, state: torch.Tensor, template: torch.Tensor, r2_vector: torch.Tensor) -> torch.Tensor:
         if r2_vector.shape[-1] == 0:

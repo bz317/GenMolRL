@@ -19,13 +19,6 @@ masking: reaction_valid
 reward: delta_qed
 max_episode_len: 5
 dataset:
-  # Clean train/test split (no leakage). Training samples starting molecules
-  # from reactants_train.pkl (n=50756) only, while evaluation cycles through
-  # reactants_test.pkl (n=12689). PPO / A2C / GraphTransRL / TD3 all use the
-  # same train-only pool so the eval distribution is genuinely held-out for
-  # every algorithm. (Earlier configs trained on reactants_full.pkl =
-  # train ∪ test, which leaked the eval starts into the training pool — that
-  # has been corrected across all algorithms.)
   training_file: data/Uni/reactants_train.pkl
   test_file: data/Uni/reactants_test.pkl
   templates_file: data/Uni/templates_unimolecolar_explicit.pkl
@@ -42,13 +35,6 @@ env:
   stop_early_penalty: 0.0
   stop_penalty_until_step: -1
   invalid_reaction_penalty: -1.0
-  # Aligned with PPO/A2C/GraphTransRL: rounding ΔQED to 3 decimals removes
-  # 4th-decimal noise from the critic regression target (most uni ΔQED
-  # transitions live in [-0.02, 0.02], so the 4th decimal is essentially
-  # numerical noise from RDKit). Without this, TD3 was fitting a noisier
-  # signal than the on-policy baselines.
-  reward_round_digits: 3
-  info_qed_round_digits: 3
 training:
   seed: 42
   total_timesteps: 1000000
@@ -117,19 +103,6 @@ td3:
   # Fallback fixed-nats target used only when target_entropy_ratio is null.
   target_entropy: 0.6
   alpha_lr: 0.0003
-  # Network architecture aligned with PPO/A2C (SB3 defaults). The actor and
-  # critic both use ``[64, 64]`` Tanh, mirroring SB3's ``MlpPolicy``. The
-  # legacy TD3 defaults (``[256, 128, 128]`` ReLU actor, ``[256, 64, 16]``
-  # ReLU critic) had ~5x more parameters than the on-policy baselines and
-  # used unbounded ReLU activations — both make small-magnitude Q regression
-  # (ΔQED ≈ 0.01 typical) noisier and more prone to overfit replay buffer
-  # transitions. Setting these to null falls back to the legacy defaults.
-  actor_hidden_dims: [64, 64]
-  critic_hidden_dims: [64, 64]
-  # No R2 head in the discrete uni variant; pi_hidden_dims is unused but kept
-  # null for parity with the continuous YAML.
-  pi_hidden_dims: null
-  activation: tanh
   save_replay_buffer_in_checkpoints: false
 callbacks:
   model_save_freq: 100000
