@@ -96,6 +96,64 @@ def test_td3_agent_dim_disentanglement():
     env_c.close()
 
 
+def test_td3_agent_arch_alignment_with_ppo():
+    """The TD3 YAMLs now configure ``[64, 64]`` Tanh actor + critic to mirror
+    PPO/A2C's SB3 ``MlpPolicy`` defaults. This test guards both:
+      1. The new YAML keys (``actor_hidden_dims`` / ``critic_hidden_dims``
+         / ``activation``) flow through to the actual ``nn.Module`` graph.
+      2. The legacy (unconfigured) path still produces the original
+         ``[256, 128, 128]`` ReLU actor, so any caller that omits these
+         keys reproduces the pre-fix behavior bit-for-bit.
+    """
+    import torch.nn as nn
+
+    register_envs()
+    from genmolrl.algorithms.td3.agent import TD3Agent
+
+    # --- Aligned config: [64, 64] Tanh, both heads ---
+    cfg = load_config("configs/td3_uni_discrete_masked_delta_qed.yaml")
+    assert cfg["td3"]["actor_hidden_dims"] == [64, 64]
+    assert cfg["td3"]["critic_hidden_dims"] == [64, 64]
+    assert cfg["td3"]["activation"] == "tanh"
+
+    kwargs = env_kwargs(cfg)
+    kwargs["algorithm_family"] = "td3_pgfs"
+    kwargs["append_action_mask_to_obs"] = True
+    env = gym.make(ENV_ID, **kwargs)
+    agent = TD3Agent(
+        env,
+        max_timesteps=10,
+        start_timesteps=1,
+        actor_hidden_dims=cfg["td3"]["actor_hidden_dims"],
+        critic_hidden_dims=cfg["td3"]["critic_hidden_dims"],
+        activation=cfg["td3"]["activation"],
+    )
+
+    actor_layers = list(agent.actor.f_net.network)
+    actor_linears = [m for m in actor_layers if isinstance(m, nn.Linear)]
+    assert [l.out_features for l in actor_linears] == [64, 64, agent.template_dim]
+    assert any(isinstance(m, nn.Tanh) for m in actor_layers), "Tanh activation missing in actor"
+    assert not any(isinstance(m, nn.ReLU) for m in actor_layers), "ReLU should not appear when activation=tanh"
+
+    critic_layers = list(agent.critic1.network)
+    critic_linears = [m for m in critic_layers if isinstance(m, nn.Linear)]
+    assert [l.out_features for l in critic_linears] == [64, 64, 1]
+    assert any(isinstance(m, nn.Tanh) for m in critic_layers), "Tanh activation missing in critic"
+    env.close()
+
+    # --- Legacy path: no knobs set => [256, 128, 128] ReLU actor ---
+    legacy_kwargs = env_kwargs(cfg)
+    legacy_kwargs["algorithm_family"] = "td3_pgfs"
+    legacy_kwargs["append_action_mask_to_obs"] = True
+    legacy_env = gym.make(ENV_ID, **legacy_kwargs)
+    legacy_agent = TD3Agent(legacy_env, max_timesteps=10, start_timesteps=1)
+    legacy_layers = list(legacy_agent.actor.f_net.network)
+    legacy_linears = [m for m in legacy_layers if isinstance(m, nn.Linear)]
+    assert [l.out_features for l in legacy_linears] == [256, 128, 128, legacy_agent.template_dim]
+    assert any(isinstance(m, nn.ReLU) for m in legacy_layers), "Legacy default should still be ReLU"
+    legacy_env.close()
+
+
 def test_non_neural_search_smoke():
     from genmolrl.algorithms.search import train
 

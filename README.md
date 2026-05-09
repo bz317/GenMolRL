@@ -309,6 +309,76 @@ PPO/A2C, GraphTransRL, and the search baselines are unaffected (the obs
 change lives entirely in `td3.train._make_td3_env`; the buffer change
 lives entirely in the TD3 YAMLs). Reward type is back to `delta_qed`.
 
+##### Deeper alignment pass (May 2026, second iteration)
+
+After the first audit fixes, continuous TD3 (W&B run `np18l9uf`) started
+moving in the right direction (`eval/mean_final_delta_qed ≈ +0.010`,
+`eval/mean_ep_length` growing 1.4 → 1.77, `positive_delta_fraction`
+growing from 22 % → 32 %), while discrete TD3 (`op4q1oxe`) stayed flat at
+`eval/stop_rate = 1.0`. A second deep comparison against PPO/A2C surfaced
+four further misalignments, all now resolved in the TD3 configs and the
+agent code:
+
+1. **Training pool aligned to `reactants_train.pkl` (no leakage).** Earlier
+   PPO / A2C / GraphTransRL configs all pointed `dataset.training_file`
+   at `reactants_full.pkl`, which is the union of `reactants_train.pkl`
+   (n = 50 756) and `reactants_test.pkl` (n = 12 689) — so every test
+   starting molecule was also a possible training start. TD3 was on the
+   clean `train.pkl` split. The fix is the opposite of what is naively
+   suggested by "make TD3 match the others": switch *all* algorithms to
+   train on `reactants_train.pkl` only, so the 12 689-molecule eval pool
+   is genuinely held-out for PPO / A2C / GraphTransRL / TD3 alike. Five
+   YAMLs were updated (`ppo_uni_masked_delta_qed.yaml`,
+   `a2c_uni_masked_delta_qed.yaml`, `graphtransrl_uni_delta_qed.yaml`,
+   `td3_uni_continuous_masked_delta_qed.yaml`,
+   `td3_uni_discrete_masked_delta_qed.yaml`). Any TD3 / PPO / A2C
+   numbers logged before this commit were trained on a leaky pool and
+   should be re-run before quoting.
+2. **`reward_round_digits = 3` and `info_qed_round_digits = 3`.** PPO/A2C
+   already round ΔQED to 3 decimals before the policy ever sees it,
+   removing 4th-decimal RDKit-numerical noise from the regression
+   target. TD3 was previously fitting full-precision rewards, so the
+   critic was learning a noticeably noisier target. Both TD3 YAMLs now
+   use the same rounding.
+3. **`actor.f_net` (current actor) used in the soft Bellman target.**
+   The entropy-regularized branch in `td3/agent.py::_train_entropy` was
+   computing `next_logits = self.actor_target.f_net(next_state_obs)`, a
+   leftover from vanilla TD3's continuous-action target smoothing. The
+   reference SAC-discrete formulation uses the *current* actor in
+   V_soft (only the critic is target-Polyak-averaged). With τ = 0.005
+   the target actor lagged the policy by ~200 gradient steps, producing
+   a stale entropy bonus and — more importantly for our failure mode —
+   a stale next-action distribution that kept reinforcing
+   `Q(s', Stop)` even after the current actor had begun to put mass on
+   a template. Switching to the current actor removes that bias and
+   aligns the branch with Christodoulou (2019). The deterministic
+   branch (`_train_deterministic`) is unchanged: it legitimately uses
+   `actor_target` for TD3-style action smoothing.
+4. **Network arch aligned to PPO/A2C (`[64, 64]` Tanh).** PPO/A2C use
+   SB3's `MlpPolicy` defaults, which is `[64, 64]` Tanh for both policy
+   and value heads. TD3 was using `[256, 128, 128]` ReLU for the actor
+   and `[256, 64, 16]` ReLU for the critic — roughly 4–5× more
+   parameters than PPO/A2C and an unbounded activation that lets Q
+   estimates drift, which is harmful in our small-reward regime
+   (typical |ΔQED| ≈ 0.01). The TD3 agent now reads `actor_hidden_dims`,
+   `critic_hidden_dims`, `pi_hidden_dims`, and `activation` from the
+   YAML; both TD3 configs default to `[64, 64]` Tanh for actor and
+   critic. The continuous R2 head (`pi_net`) has no PPO/A2C analog and
+   stays at the legacy `[256, 256, 167]` ReLU unless the user opts in.
+   When all knobs are unset (as in any pre-existing test fixture or
+   external YAML) the legacy widths/activation are restored bit-for-bit
+   for backward compatibility (covered by
+   `tests/test_env_smoke.py::test_td3_agent_arch_alignment_with_ppo`).
+
+After (1)–(4), the discrete TD3 actor `f_net` collapses to ~72 k
+parameters (from ~318 k) and the critic to ~72 k (from ~133 k),
+matching PPO/A2C's policy/value head sizes within ~1 %. Continuous TD3
+keeps the larger R2 head, so it is still ~620 k actor parameters
+(`f_net=72 k + pi_net=550 k`).
+
+These four fixes only change the TD3 path; PPO/A2C/GraphTransRL/search
+configs, agents, and behavior are byte-identical to before.
+
 ### GraphTransRL
 
 `graphtransrl` trains a GenMolRL-owned graph-transformer RL policy. The method does not learn the first reactant: training episodes start from random molecules sampled from `dataset.training_file`, and each eval pass cycles through every molecule in `dataset.test_file` exactly once.

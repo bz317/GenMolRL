@@ -225,6 +225,24 @@ def train(config: dict, experiment_name: str):
     target_entropy_ratio = None if _ratio_cfg is None else float(_ratio_cfg)
     alpha_lr = float(td3_cfg.get("alpha_lr", 3e-4))
 
+    # Network width / activation are configurable so TD3 can mirror PPO/A2C's
+    # SB3 default ``[64, 64]`` Tanh policy/critic. When a key is omitted from
+    # the YAML the agent falls back to the legacy ``[256, 128, 128]`` ReLU
+    # actor / ``[256, 64, 16]`` ReLU critic / ``[256, 256, 167]`` ReLU R2 head
+    # so existing TD3 configs reproduce bit-for-bit.
+    def _hidden_dims(key):
+        value = td3_cfg.get(key)
+        if value is None:
+            return None
+        return [int(x) for x in value]
+
+    actor_hidden_dims = _hidden_dims("actor_hidden_dims")
+    critic_hidden_dims = _hidden_dims("critic_hidden_dims")
+    pi_hidden_dims = _hidden_dims("pi_hidden_dims")
+    activation = td3_cfg.get("activation")
+    if isinstance(activation, str):
+        activation = activation.lower()
+
     agent = TD3Agent(
         env,
         float(td3_cfg.get("actor_lr", 1e-4)),
@@ -246,6 +264,10 @@ def train(config: dict, experiment_name: str):
         target_entropy=target_entropy,
         target_entropy_ratio=target_entropy_ratio,
         alpha_lr=alpha_lr,
+        actor_hidden_dims=actor_hidden_dims,
+        critic_hidden_dims=critic_hidden_dims,
+        pi_hidden_dims=pi_hidden_dims,
+        activation=activation,
     )
     replay_buffer = ReplayBuffer(
         env.unwrapped.observation_space.shape[0],
