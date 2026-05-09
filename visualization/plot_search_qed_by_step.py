@@ -22,13 +22,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-METHODS = ("Exhaustive", "Greedy", "Random", "PPO", "A2C")
+METHODS = ("Exhaustive", "Greedy", "Random", "PPO", "A2C", "TD3")
 COLORS = {
     "Exhaustive": "#4C78A8",
     "Greedy": "#F58518",
     "Random": "#54A24B",
     "PPO": "#B279A2",
     "A2C": "#E45756",
+    "TD3": "#9D755D",
 }
 
 
@@ -224,6 +225,218 @@ def evaluate_sb3_policy(
     return values
 
 
+def _infer_seq_hidden_dims(state_dict: dict, prefix: str) -> list[int] | None:
+    """Recover ``hidden_dims`` from a saved ``nn.Sequential`` of Linear+Activation
+    pairs followed by a final Linear output layer.
+
+    Each Linear has key ``{prefix}.{i}.weight`` with shape ``(out, in)``; the
+    hidden dims are the out-dims of every Linear *except* the last (output) one.
+    Returns ``None`` if no matching layers are present (e.g. uni-discrete actor
+    with no pi-net).
+    """
+    indices: list[int] = []
+    for key in state_dict.keys():
+        if not (key.startswith(prefix + ".") and key.endswith(".weight")):
+            continue
+        rest = key[len(prefix) + 1 : -len(".weight")]
+        if "." in rest:
+            continue
+        try:
+            indices.append(int(rest))
+        except ValueError:
+            continue
+    if not indices:
+        return None
+    indices.sort()
+    if len(indices) < 2:
+        return []
+    return [int(state_dict[f"{prefix}.{i}.weight"].shape[0]) for i in indices[:-1]]
+
+
+def _infer_td3_arch(checkpoint: dict) -> dict:
+    """Best-effort recovery of the actor/critic architecture from a TD3
+    checkpoint produced by ``TD3Agent.save_model``.
+
+    Activation isn't stored in the state dict, so we use the legacy actor
+    width (``[256, 128, 128]``) as the heuristic for ReLU and the SB3-default
+    ``[64, 64]`` shape as the heuristic for Tanh. This matches the two
+    architectures any current checkpoint in this repo can have.
+    """
+    actor_sd = checkpoint.get("actor_state_dict", {})
+    critic_sd = checkpoint.get("critic1_state_dict", {})
+    actor_hidden = _infer_seq_hidden_dims(actor_sd, "f_net.network")
+    pi_hidden = _infer_seq_hidden_dims(actor_sd, "pi_net.network")
+    critic_hidden = _infer_seq_hidden_dims(critic_sd, "network")
+    legacy_actor = [256, 128, 128]
+    activation = "relu" if actor_hidden == legacy_actor else "tanh"
+    return {
+        "actor_hidden_dims": actor_hidden,
+        "pi_hidden_dims": pi_hidden,
+        "critic_hidden_dims": critic_hidden,
+        "activation": activation,
+    }
+
+
+def evaluate_td3_policy(
+    *,
+    repo_root: Path,
+    model_path: Path,
+    config_path: Path,
+    cache_path: Path,
+    max_step: int,
+) -> dict[int, list[float]]:
+    """Roll out the trained TD3/PGFS agent on the eval start pool.
+
+    Mirrors ``_evaluate_td3`` in ``genmolrl.algorithms.td3.train`` (deterministic
+    actor argmax, KNN-wrapped env enabled) but writes per-episode trajectories
+    to ``cache_path`` for the QED-by-step plot, instead of logging to wandb.
+    """
+
+    cached = parse_cached_policy_eval(cache_path, max_step)
+    if cached is not None:
+        return cached
+
+    sys.path.insert(0, str(repo_root))
+    import torch
+
+    from genmolrl.algorithms.td3.agent import TD3Agent
+    from genmolrl.algorithms.td3.mask_kind import td3_template_mask_kind
+    from genmolrl.algorithms.td3.train import _make_td3_env
+    from genmolrl.config import load_config
+
+    config = load_config(config_path)
+    config["algorithm"] = "TD3"
+    env = _make_td3_env(config, eval_env=True)
+
+    td3_cfg = config.get("td3", {})
+    train_cfg = config.get("training", {})
+
+    def _yaml_hidden_dims(key):
+        value = td3_cfg.get(key)
+        if value is None:
+            return None
+        return [int(x) for x in value]
+
+    template_mask_cfg = td3_cfg.get("template_mask_kind")
+    template_mask_kind = template_mask_cfg if isinstance(template_mask_cfg, str) else None
+
+    target_entropy_ratio_cfg = td3_cfg.get("target_entropy_ratio")
+    target_entropy_ratio = (
+        None if target_entropy_ratio_cfg is None else float(target_entropy_ratio_cfg)
+    )
+
+    # The current YAML can disagree with what was on disk at training time
+    # (the [64, 64] / Tanh keys were added on 2026-05-09; older checkpoints
+    # were trained with the legacy [256, 128, 128] ReLU defaults). Recover the
+    # actual training-time architecture from the saved state dict so the load
+    # matches the parameter shapes either way.
+    try:
+        checkpoint = torch.load(str(model_path), map_location="cpu", weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(str(model_path), map_location="cpu")
+    inferred = _infer_td3_arch(checkpoint)
+
+    yaml_actor = _yaml_hidden_dims("actor_hidden_dims")
+    yaml_critic = _yaml_hidden_dims("critic_hidden_dims")
+    yaml_pi = _yaml_hidden_dims("pi_hidden_dims")
+    yaml_activation = td3_cfg.get("activation")
+    if isinstance(yaml_activation, str):
+        yaml_activation = yaml_activation.lower()
+
+    actor_hidden = inferred["actor_hidden_dims"] if inferred["actor_hidden_dims"] is not None else yaml_actor
+    pi_hidden = inferred["pi_hidden_dims"] if inferred["pi_hidden_dims"] else yaml_pi
+    critic_hidden = inferred["critic_hidden_dims"] if inferred["critic_hidden_dims"] is not None else yaml_critic
+    activation = inferred["activation"] if inferred["activation"] is not None else yaml_activation
+
+    agent = TD3Agent(
+        env,
+        actor_lr=float(td3_cfg.get("actor_lr", 1e-4)),
+        critic_lr=float(td3_cfg.get("critic_lr", 3e-4)),
+        gamma=float(td3_cfg.get("gamma", 0.99)),
+        tau=float(td3_cfg.get("tau", 0.005)),
+        policy_noise=float(td3_cfg.get("policy_noise", 0.2)),
+        noise_std=float(td3_cfg.get("noise_std", 0.1)),
+        noise_clip=float(td3_cfg.get("noise_clip", 0.2)),
+        policy_freq=int(td3_cfg.get("policy_freq", 2)),
+        temperature_start=float(td3_cfg.get("initial_temperature", 1.0)),
+        temperature_end=float(td3_cfg.get("min_temperature", 0.25)),
+        start_timesteps=int(train_cfg.get("start_timesteps", 10000)),
+        max_timesteps=int(train_cfg.get("total_timesteps", 1_000_000)),
+        template_mask_kind=template_mask_kind,
+        entropy_regularization=bool(td3_cfg.get("entropy_regularization", False)),
+        entropy_alpha=float(td3_cfg.get("entropy_alpha", 0.2)),
+        auto_tune_alpha=bool(td3_cfg.get("auto_tune_alpha", False)),
+        target_entropy=float(td3_cfg.get("target_entropy", 0.5)),
+        target_entropy_ratio=target_entropy_ratio,
+        alpha_lr=float(td3_cfg.get("alpha_lr", 3e-4)),
+        actor_hidden_dims=actor_hidden,
+        critic_hidden_dims=critic_hidden,
+        pi_hidden_dims=pi_hidden,
+        activation=activation,
+    )
+    agent.apply_checkpoint(checkpoint, source_label=str(model_path))
+
+    use_stop_action = bool(env.unwrapped.use_stop_action)
+    num_templates = int(env.unwrapped.num_templates)
+
+    def _has_real_action(smiles: str | None) -> bool:
+        if not smiles:
+            return False
+        kind = td3_template_mask_kind(env, override=template_mask_kind)
+        return bool(env.unwrapped.reaction_manager.feasible_first_reactant_templates(smiles, kind=kind))
+
+    env.unwrapped.start_strategy.reset_cycle()
+    n_eval = env.unwrapped.start_strategy.num_starts()
+
+    values = {step: [] for step in range(0, max_step + 1)}
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with cache_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            ["method", "episode", "start_smiles", "final_smiles", "initial_qed", "final_qed", "num_reactions"]
+        )
+        for episode in range(n_eval):
+            state, info = env.reset()
+            start_smiles = str(info.get("SMILES", ""))
+            initial_qed = float(info.get("QED", 0.0))
+            final_smiles = start_smiles
+            final_qed = initial_qed
+            num_reactions = 0
+            done = False
+
+            while not done:
+                if not use_stop_action and not _has_real_action(info.get("SMILES")):
+                    break
+                if hasattr(env, "enable"):
+                    env.enable()
+                action = agent.get_action(state, evaluate=True)
+                template_idx = int(action[0].detach().reshape(-1).argmax().item())
+                selected_stop = use_stop_action and template_idx == num_templates
+                state, _reward, terminated, truncated, info = env.step(action)
+                done = bool(terminated or truncated)
+                if (
+                    selected_stop
+                    or info.get("stop")
+                    or info.get("reaction_failed")
+                    or info.get("bad_template_index") is not None
+                ):
+                    final_smiles = str(info.get("SMILES") or final_smiles)
+                    final_qed = float(info.get("QED", final_qed))
+                    break
+                num_reactions = int(info.get("step", num_reactions))
+                final_smiles = str(info.get("SMILES") or final_smiles)
+                final_qed = float(info.get("QED", final_qed))
+
+            if 0 <= num_reactions <= max_step:
+                values[num_reactions].append(final_qed)
+            writer.writerow(
+                ["TD3", episode, start_smiles, final_smiles, initial_qed, final_qed, num_reactions]
+            )
+
+    env.close()
+    return values
+
+
 def quantile(values: list[float], q: float) -> float:
     ordered = sorted(values)
     return ordered[round((len(ordered) - 1) * q)]
@@ -273,6 +486,13 @@ def plot_boxplots(
     if max_step == 0:
         axes = [axes]
 
+    n_methods = len(METHODS)
+    spacing = 0.12
+    half_span = (n_methods - 1) * spacing / 2.0
+    all_positions = [1.0 + (i - (n_methods - 1) / 2.0) * spacing for i in range(n_methods)]
+    position_by_method = dict(zip(METHODS, all_positions))
+    xlim = (1.0 - half_span - spacing, 1.0 + half_span + spacing)
+
     for axis_index, axis in enumerate(axes):
         step = axis_index
         present = [
@@ -281,8 +501,6 @@ def plot_boxplots(
             if grouped_values[method][step]
         ]
         data = [values for _, values in present]
-        all_positions = [0.72, 0.86, 1.0, 1.14, 1.28]
-        position_by_method = dict(zip(METHODS, all_positions))
         positions = [position_by_method[method] for method, _ in present]
         box = axis.boxplot(
             data,
@@ -304,7 +522,7 @@ def plot_boxplots(
         else:
             axis.set_title(f"After {step} reaction{'s' if step > 1 else ''}")
         axis.set_xlabel("Method")
-        axis.set_xlim(0.62, 1.38)
+        axis.set_xlim(*xlim)
         axis.set_xticks(all_positions)
         axis.set_xticklabels(METHODS)
         axis.tick_params(axis="x", rotation=30)
@@ -352,12 +570,17 @@ def main() -> None:
     parser.add_argument(
         "--ppo-model",
         type=Path,
-        default=repo_root / "runs/3zd846ff/wandb_model/model.zip",
+        default=repo_root / "runs/06mjmn3t/wandb_model/model.zip",
     )
     parser.add_argument(
         "--a2c-model",
         type=Path,
-        default=repo_root / "runs/en3i9xg8/wandb_model/model.zip",
+        default=repo_root / "runs/lw78laao/wandb_model/model.zip",
+    )
+    parser.add_argument(
+        "--td3-model",
+        type=Path,
+        default=repo_root / "runs/np18l9uf/td3_checkpoints/final_model.pth",
     )
     parser.add_argument(
         "--ppo-config",
@@ -370,14 +593,24 @@ def main() -> None:
         default=repo_root / "configs/a2c_uni_masked_delta_qed.yaml",
     )
     parser.add_argument(
+        "--td3-config",
+        type=Path,
+        default=repo_root / "configs/td3_uni_continuous_masked_delta_qed.yaml",
+    )
+    parser.add_argument(
         "--ppo-cache",
         type=Path,
-        default=repo_root / "visualization/ppo_3zd846ff_eval_trajectories.csv",
+        default=repo_root / "visualization/ppo_06mjmn3t_eval_trajectories.csv",
     )
     parser.add_argument(
         "--a2c-cache",
         type=Path,
-        default=repo_root / "visualization/a2c_en3i9xg8_eval_trajectories.csv",
+        default=repo_root / "visualization/a2c_lw78laao_eval_trajectories.csv",
+    )
+    parser.add_argument(
+        "--td3-cache",
+        type=Path,
+        default=repo_root / "visualization/td3_np18l9uf_eval_trajectories.csv",
     )
     parser.add_argument("--max-step", type=int, default=5)
     parser.add_argument(
@@ -422,6 +655,13 @@ def main() -> None:
             model_path=args.a2c_model,
             config_path=args.a2c_config,
             cache_path=args.a2c_cache,
+            max_step=args.max_step,
+        ),
+        "TD3": evaluate_td3_policy(
+            repo_root=repo_root,
+            model_path=args.td3_model,
+            config_path=args.td3_config,
+            cache_path=args.td3_cache,
             max_step=args.max_step,
         ),
     }
