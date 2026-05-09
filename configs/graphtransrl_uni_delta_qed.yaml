@@ -17,7 +17,9 @@ env:
   info_qed_round_digits: 3
 training:
   seed: 42
-  total_timesteps: 100000
+  # Honest budget: at ~2k iter/hour observed on gpu-q, 50k fits comfortably in a
+  # 24h slurm allocation (previous c2z62bqj at 100k only reached ~38k by walltime).
+  total_timesteps: 50000
   # Larger batch averages each TB gradient over more diverse trajectories;
   # at batch_size=16 the gradient was estimated from very few samples per step.
   batch_size: 32
@@ -32,15 +34,24 @@ graphtransrl:
   weight_decay: 0.0
   init_log_z: 0.0
   # Epsilon-greedy template exploration with linear decay (PPO/A2C-style spread)
-  # so the categorical doesn't collapse to a deterministic mode early.
+  # so the categorical doesn't collapse to a deterministic mode early. Higher
+  # floor (0.10) and shorter decay window (35k of 50k) keep the buffer freshly
+  # supplied with off-policy trajectories deep into training.
   random_action_prob: 0.3
-  random_action_min_prob: 0.05
-  random_action_decay_steps: 50000
-  # Inverse temperature on the TB target (target = reward_beta * log(R+1));
-  # >1.0 sharpens learning toward high-R trajectories.
-  reward_beta: 3.0
+  random_action_min_prob: 0.10
+  random_action_decay_steps: 35000
+  # Inverse temperature on the TB target (target = reward_beta * log(R+1)).
+  # Lowered from 3.0 -> 1.0 so the loss isn't dominated by a small set of
+  # high-R trajectories (with beta=3 a r=0.5 trajectory was 3.4x more
+  # attractive than r=0.2; with beta=1 it's only 1.4x), which combined with a
+  # small replay buffer caused c2z62bqj to lock onto a frozen top-trajectory
+  # at iter ~7k and stagnate on eval for the next 30k iterations.
+  reward_beta: 1.0
   # Best-K trajectory replay buffer; with probability ``replay_prob`` we replay
   # a stored top trajectory under the current policy instead of sampling fresh.
-  replay_buffer_size: 128
-  replay_prob: 0.4
+  # Larger buffer (128 -> 1024) represents more train molecules and lowers
+  # the per-trajectory revisit rate; lower replay_prob (0.4 -> 0.15) leaves
+  # 85% of batches for fresh exploration to keep the buffer refreshing.
+  replay_buffer_size: 1024
+  replay_prob: 0.15
   device: null

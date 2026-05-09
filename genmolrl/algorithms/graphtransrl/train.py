@@ -133,6 +133,11 @@ class _BestTrajectoryReplayBuffer:
     def top_reward(self) -> float:
         return self.entries[-1][0] if self.entries else float("nan")
 
+    def bottom_reward(self) -> float:
+        # Lowest-reward entry currently in the buffer; a new trajectory must
+        # exceed this threshold to be admitted once the buffer is full.
+        return self.entries[0][0] if self.entries else float("nan")
+
 
 class StartSampler:
     def __init__(self, train_smiles: list[str], test_smiles: list[str], seed: int):
@@ -223,18 +228,23 @@ class GraphTransRL:
             + (self.random_action_min_prob - self.random_action_prob) * progress
         )
 
-    def _action_mask(self, smiles: str) -> torch.Tensor:
+    def _action_mask(self, smiles: str, *, force_stop: bool = False) -> torch.Tensor:
+        # ``force_stop=True`` is used when the trajectory has consumed its full
+        # ``max_episode_len`` react budget: only Stop is feasible, so we drop all
+        # template actions from the mask. This keeps ``log_pf`` consistent with
+        # the committed reward sequence (no "phantom" 6th decision is appended).
         mask = torch.zeros(self.num_templates + 1, dtype=torch.bool, device=self.device)
-        template_mask = self.reaction_manager.get_mask(smiles, kind=self.masking).to(self.device) > 0.5
-        mask[: self.num_templates] = template_mask
+        if not force_stop:
+            template_mask = self.reaction_manager.get_mask(smiles, kind=self.masking).to(self.device) > 0.5
+            mask[: self.num_templates] = template_mask
         if self.use_stop_action:
             mask[self.stop_index] = True
         return mask
 
-    def _masked_logits(self, smiles: str) -> tuple[torch.Tensor, torch.Tensor]:
+    def _masked_logits(self, smiles: str, *, force_stop: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
         graph = batch_from_smiles([smiles], device=self.device)
         logits = self.policy(graph, torch.ones((1, 1), device=self.device))[0]
-        mask = self._action_mask(smiles)
+        mask = self._action_mask(smiles, force_stop=force_stop)
         return logits.masked_fill(~mask, -1e9), mask
 
     def _choose_action(self, logits: torch.Tensor, mask: torch.Tensor, *, greedy: bool) -> tuple[int, torch.Tensor]:
@@ -268,7 +278,10 @@ class GraphTransRL:
             forward_log_flows: list[torch.Tensor] = []
 
             for _ in range(self.max_episode_len + int(self.use_stop_action)):
-                logits, mask = self._masked_logits(current)
+                at_max = traj.episode_len >= self.max_episode_len
+                if at_max and not self.use_stop_action:
+                    break
+                logits, mask = self._masked_logits(current, force_stop=at_max)
                 if not bool(mask.any()):
                     break
                 action, log_prob = self._choose_action(logits, mask, greedy=greedy)
@@ -276,8 +289,6 @@ class GraphTransRL:
                 forward_log_flows.append(torch.logsumexp(logits[mask], dim=0))
                 if action == self.stop_index:
                     traj.actions.append(STOP_ACTION)
-                    break
-                if traj.episode_len >= self.max_episode_len:
                     break
                 product = self.reaction_manager.apply_reaction(current, self.reaction_manager.templates[action], None)
                 if product is None:
@@ -293,8 +304,6 @@ class GraphTransRL:
                 current = product
                 current_qed = next_qed
                 traj.final_smiles = product
-                if traj.episode_len >= self.max_episode_len:
-                    break
             if not forward_log_flows:
                 forward_log_flows.append(self.log_z * 0.0)
             return traj, log_probs, forward_log_flows
@@ -319,11 +328,15 @@ class GraphTransRL:
         log_probs: list[torch.Tensor] = []
         forward_log_flows: list[torch.Tensor] = []
         with ctx:
+            react_steps = 0
             for i, action in enumerate(actions):
                 if i >= len(smiles_sequence):
                     break
                 current = smiles_sequence[i]
-                logits, mask = self._masked_logits(current)
+                at_max = react_steps >= self.max_episode_len
+                if at_max and not self.use_stop_action:
+                    break
+                logits, mask = self._masked_logits(current, force_stop=at_max)
                 if not bool(mask.any()):
                     break
                 if isinstance(action, str) and action == STOP_ACTION:
@@ -335,6 +348,7 @@ class GraphTransRL:
                     if a < 0 or a >= mask.numel() or not bool(mask[a]):
                         break
                     log_prob = F.log_softmax(logits, dim=-1)[a]
+                    react_steps += 1
                 log_probs.append(log_prob)
                 forward_log_flows.append(torch.logsumexp(logits[mask], dim=0))
             if not forward_log_flows:
@@ -407,6 +421,7 @@ class GraphTransRL:
             "train/replay_fraction": float(np.mean(replay_flags)) if replay_flags else 0.0,
             "train/replay_buffer_size": int(len(self.replay_buffer)),
             "train/replay_buffer_top_reward": self.replay_buffer.top_reward(),
+            "train/replay_buffer_bottom_reward": self.replay_buffer.bottom_reward(),
             "train/reward_beta": float(self.reward_beta),
         }
 
