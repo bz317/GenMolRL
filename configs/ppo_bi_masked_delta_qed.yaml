@@ -1,0 +1,56 @@
+project: GenMolRL_Bi
+experiment_name: PPO_Bi
+reaction_mode: bi
+masking: reaction_valid
+reward: delta_qed
+max_episode_len: 5
+dataset:
+  training_file: data/Bi/reactants_train.pkl
+  test_file: data/Bi/reactants_test.pkl
+  templates_file: data/Bi/templates.pkl
+  start_strategy: random_pool
+env:
+  # Bi-reaction needs MultiDiscrete([T+1, R2]) so the policy can pick a
+  # second reactant alongside the template. With the current Bi templates
+  # this resolves to MultiDiscrete([103, 116415]) at runtime; the masking
+  # layer marks T as feasible-only (reaction_valid) and leaves R2 fully
+  # available to mirror genmolrl/envs/masking.py:multidiscrete_mask.
+  algorithm_family: sb3_multidiscrete
+  action_design: discrete
+  use_stop_action: true
+  stop_early_penalty: 0.0
+  stop_penalty_until_step: 3
+  invalid_reaction_penalty: -1.0
+  reward_round_digits: 3
+  info_qed_round_digits: 3
+  # Default would concatenate the full T+R2 mask onto the 1024-dim Morgan
+  # FP, ballooning obs to ~118k dims. MaskablePPO already pulls masks via
+  # env.action_masks() so there's no need to ship them through the obs;
+  # disabling this keeps the policy MLP at ~67k input weights instead of
+  # ~7.5M and dramatically speeds up rollouts.
+  append_action_mask_to_obs: false
+training:
+  seed: 42
+  total_timesteps: 1000000
+  eval_freq: 10000
+  n_envs: 1
+ppo:
+  # PPO knobs are kept identical to configs/ppo_uni_masked_delta_qed.yaml
+  # so any Bi-vs-Uni delta is attributable to the action space, not the
+  # learning rule. Tune later (e.g. lower lr, larger n_steps) once the
+  # MultiDiscrete head is confirmed to learn.
+  learning_rate: 0.0003
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: 0.02
+  progress_bar: false
+callbacks:
+  model_save_freq: 100000
+  gradient_save_freq: 100
