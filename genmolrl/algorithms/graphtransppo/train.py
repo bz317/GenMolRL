@@ -212,6 +212,7 @@ class GraphTransPPO:
         self._ep_reward_window: deque[float] = deque(maxlen=100)
         self._ep_length_window: deque[int] = deque(maxlen=100)
         self._total_episodes: int = 0
+        self._cumulative_reward: float = 0.0
 
     # ------------------------------------------------------------------
     # Action masking + policy evaluation primitives
@@ -251,11 +252,27 @@ class GraphTransPPO:
     # On-policy rollout collection
     # ------------------------------------------------------------------
 
-    def collect_rollout(self, n_steps: int) -> tuple[list[_Transition], float]:
+    def collect_rollout(
+        self,
+        n_steps: int,
+        *,
+        base_step: int = 0,
+        log_episodes: bool = True,
+    ) -> tuple[list[_Transition], float]:
         """Collect ``n_steps`` transitions and return ``(transitions, last_value)``.
 
         ``last_value`` is the bootstrap V(s_T) for the trailing transition if
         the rollout ended mid-episode; 0.0 if it ended exactly on a ``done``.
+
+        When ``log_episodes`` is true and a wandb run is active, episode-level
+        train metrics (``train/episode_reward``, sliding-window means,
+        ``train/total_episodes``, ``cumulative_reward``) are logged at the
+        env-step where each episode ends. This gives a dense ``train/*`` curve
+        that starts as soon as the first episode terminates -- typically at
+        step 1-3 rather than waiting for the first full rollout to finish.
+        ``base_step`` is the global env-step count *before* this rollout
+        starts; per-episode logs use ``base_step + steps_taken`` for
+        wandb-monotonic step indices.
         """
         self.policy.eval()
         transitions: list[_Transition] = []
@@ -279,7 +296,9 @@ class GraphTransPPO:
                 if at_max and not self.use_stop_action:
                     if transitions:
                         transitions[-1].done = True
-                    self._reset_episode(ep_reward, ep_length)
+                    self._end_episode(
+                        ep_reward, ep_length, base_step + steps_taken, log_episodes
+                    )
                     ep_reward, ep_length = 0.0, 0
                     continue
 
@@ -290,7 +309,9 @@ class GraphTransPPO:
                     # Nothing legal: end the current episode.
                     if transitions:
                         transitions[-1].done = True
-                    self._reset_episode(ep_reward, ep_length)
+                    self._end_episode(
+                        ep_reward, ep_length, base_step + steps_taken, log_episodes
+                    )
                     ep_reward, ep_length = 0.0, 0
                     continue
 
@@ -341,7 +362,9 @@ class GraphTransPPO:
                 ep_length += 1
 
                 if done:
-                    self._reset_episode(ep_reward, ep_length)
+                    self._end_episode(
+                        ep_reward, ep_length, base_step + steps_taken, log_episodes
+                    )
                     ep_reward, ep_length = 0.0, 0
 
         # Bootstrap value for the trailing partial episode (last transition
@@ -353,11 +376,32 @@ class GraphTransPPO:
                 last_value = float(v.item())
         return transitions, last_value
 
-    def _reset_episode(self, ep_reward: float, ep_length: int) -> None:
+    def _end_episode(
+        self,
+        ep_reward: float,
+        ep_length: int,
+        step: int,
+        log: bool,
+    ) -> None:
+        """Update rolling stats, optionally emit per-episode wandb log, then reset."""
         if ep_length > 0:
             self._ep_reward_window.append(float(ep_reward))
             self._ep_length_window.append(int(ep_length))
             self._total_episodes += 1
+            self._cumulative_reward += float(ep_reward)
+            if log and wandb.run is not None:
+                wandb.log(
+                    {
+                        "train/global_step": int(step),
+                        "train/episode_reward": float(ep_reward),
+                        "train/episode_length": int(ep_length),
+                        "train/mean_reward": float(np.mean(self._ep_reward_window)),
+                        "train/mean_ep_length": float(np.mean(self._ep_length_window)),
+                        "train/total_episodes": float(self._total_episodes),
+                        "cumulative_reward": float(self._cumulative_reward),
+                    },
+                    step=int(step),
+                )
         self._current_smiles = self.sampler.sample_train()
         self._current_react_steps = 0
 
@@ -601,23 +645,25 @@ def train(config: dict, experiment_name: str) -> None:
     last_eval_bucket = -1
     last_save_bucket = -1
     while global_step < total_timesteps:
-        rollout, last_value = trainer.collect_rollout(n_steps)
+        # Episode-level train metrics are emitted inline by collect_rollout at
+        # the env-step each episode ends, so the train/* curve has fine
+        # granularity from step ~1 onward instead of waiting for the first
+        # rollout to complete.
+        rollout, last_value = trainer.collect_rollout(
+            n_steps, base_step=global_step, log_episodes=True
+        )
         advantages, returns = trainer.compute_gae(rollout, last_value)
         update_metrics = trainer.ppo_update(rollout, advantages, returns)
         global_step += len(rollout)
 
         rewards = [tr.reward for tr in rollout]
+        # Rollout-summary + PPO update metrics share this wandb step; eval
+        # metrics (when triggered below) intentionally land on a separate log
+        # call so they remain a distinct row in wandb's history.
         rollout_metrics = {
             "train/global_step": global_step,
             "train/rollout_steps": float(len(rollout)),
             "train/rollout_mean_reward": float(np.mean(rewards)) if rewards else 0.0,
-            "train/mean_reward": float(np.mean(trainer._ep_reward_window))
-            if trainer._ep_reward_window
-            else 0.0,
-            "train/mean_ep_length": float(np.mean(trainer._ep_length_window))
-            if trainer._ep_length_window
-            else 0.0,
-            "train/total_episodes": float(trainer._total_episodes),
         }
         wandb.log({**rollout_metrics, **update_metrics}, step=global_step)
 
