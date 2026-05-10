@@ -1,0 +1,59 @@
+project: GenMolRL
+experiment_name: GraphTransPPO_Uni
+reaction_mode: uni
+masking: reaction_valid
+reward: delta_qed
+max_episode_len: 5
+dataset:
+  training_file: data/Uni/reactants_train.pkl
+  test_file: data/Uni/reactants_test.pkl
+  templates_file: data/Uni/templates_unimolecolar_explicit.pkl
+  start_strategy: random_pool
+env:
+  algorithm_family: graphtransppo
+  action_design: reaction_graph_action
+  use_stop_action: true
+  reward_round_digits: 3
+  info_qed_round_digits: 3
+  invalid_reaction_penalty: -1.0
+training:
+  seed: 42
+  # 50k env-step budget aligned with the GraphTransRL config so the two graph-
+  # transformer methods compare on equal HPC wallclock. With n_steps=2048 this
+  # is ~25 rollouts (~25 * 320 = 8k SGD updates), which fits inside the 36h
+  # slurm allocation comfortably. Bump to 1M when running a full PPO baseline
+  # comparison against `configs/ppo_uni_masked_delta_qed.yaml`.
+  total_timesteps: 50000
+  eval_freq: 1000
+  save_freq: 10000
+graphtransppo:
+  # Backbone: identical to the GraphTransRL config so any deltas are due to
+  # the learning rule, not the encoder size.
+  num_emb: 64
+  num_layers: 3
+  num_heads: 2
+  # PPO knobs mirror SB3 PPO defaults; tuned a touch for the graph encoder:
+  #   * lr 3e-4 matches PPO_Uni; the graph net handles it without instability.
+  #   * n_steps 2048 + minibatch 64 + n_epochs 10 = 320 SGD updates per
+  #     rollout, the same ratio that gave SB3 PPO its sample efficiency.
+  #   * ent_coef 0.01 (vs. SB3 PPO's 0.0) because the graph encoder collapses
+  #     entropy faster than a tiny MLP on Morgan FPs; a small bonus keeps
+  #     the masked categorical from going deterministic before the value
+  #     head has learned anything useful.
+  #   * target_kl 0.02 matches PPO_Uni and triggers SB3-style epoch early-stop.
+  learning_rate: 0.0003
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  clip_range_vf: null
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: 0.02
+  normalize_advantage: true
+  weight_decay: 0.0
+  adam_eps: 0.00001
+  device: null

@@ -24,6 +24,10 @@ def _trainer(algorithm: str):
         from genmolrl.methods.graphtransrl_adapter import GraphTransRLAdapter
 
         train = GraphTransRLAdapter.train
+    elif algorithm == "graphtransppo":
+        from genmolrl.methods.graphtransppo_adapter import GraphTransPPOAdapter
+
+        train = GraphTransPPOAdapter.train
     else:
         raise ValueError(f"Unsupported algorithm: {algorithm}")
     return train
@@ -41,6 +45,7 @@ def main() -> None:
             "greedy_search",
             "exhausted_search",
             "graphtransrl",
+            "graphtransppo",
         ],
         required=True,
     )
