@@ -23,9 +23,9 @@ training:
   # is ~25 rollouts (~25 * 320 = 8k SGD updates), which fits inside the 36h
   # slurm allocation comfortably. Bump to 1M when running a full PPO baseline
   # comparison against `configs/ppo_uni_masked_delta_qed.yaml`.
-  total_timesteps: 50000
-  eval_freq: 1000
-  save_freq: 10000
+  total_timesteps: 1000000
+  eval_freq: 10000
+  save_freq: 100000
 graphtransppo:
   # Backbone: identical to the GraphTransRL config so any deltas are due to
   # the learning rule, not the encoder size.

@@ -22,14 +22,26 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-METHODS = ("Exhaustive", "Greedy", "Random", "PPO", "A2C", "TD3")
+METHODS = ("Exhaustive", "GraphTransPPO", "PPO", "A2C", "TD3", "Greedy", "Random")
 COLORS = {
     "Exhaustive": "#4C78A8",
     "Greedy": "#F58518",
     "Random": "#54A24B",
     "PPO": "#B279A2",
+    "GraphTransPPO": "#72B7B2",
     "A2C": "#E45756",
     "TD3": "#9D755D",
+}
+# Short tick labels keep the per-step subplots thin enough for a 16:9 slide
+# even with 7 methods.
+DISPLAY_NAMES = {
+    "Exhaustive": "Exhaustive",
+    "Greedy": "Greedy",
+    "Random": "Random",
+    "PPO": "PPO",
+    "GraphTransPPO": "GT-PPO",
+    "A2C": "A2C",
+    "TD3": "TD3",
 }
 
 
@@ -437,6 +449,103 @@ def evaluate_td3_policy(
     return values
 
 
+def evaluate_graphtransppo_policy(
+    *,
+    repo_root: Path,
+    model_path: Path,
+    config_path: Path,
+    cache_path: Path,
+    max_step: int,
+) -> dict[int, list[float]]:
+    """Roll out the trained GraphTransPPO agent on the eval start pool.
+
+    Mirrors :meth:`GraphTransPPO._greedy_trajectory` (deterministic argmax over
+    masked logits, Stop / invalid-reaction termination) but records the
+    absolute ``final_qed`` plus ``num_reactions`` per episode and writes a
+    per-episode CSV cache for the QED-by-step plot.
+    """
+    cached = parse_cached_policy_eval(cache_path, max_step)
+    if cached is not None:
+        return cached
+
+    sys.path.insert(0, str(repo_root))
+    import torch
+
+    from genmolrl.algorithms.graphtransppo.train import GraphTransPPO, _qed
+    from genmolrl.config import load_config
+
+    config = load_config(config_path)
+    # Force CPU so the script also works on login nodes without a GPU; the
+    # eval is small (one greedy trajectory per test SMILES) so the CPU path
+    # is plenty fast and avoids a CUDA dependency for plot regeneration.
+    config.setdefault("graphtransppo", {})["device"] = "cpu"
+    trainer = GraphTransPPO(config)
+
+    try:
+        checkpoint = torch.load(str(model_path), map_location="cpu", weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(str(model_path), map_location="cpu")
+    state = checkpoint.get("policy", checkpoint)
+    trainer.policy.load_state_dict(state)
+    trainer.policy.eval()
+
+    values = {step: [] for step in range(0, max_step + 1)}
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with cache_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "method",
+                "episode",
+                "start_smiles",
+                "final_smiles",
+                "initial_qed",
+                "final_qed",
+                "num_reactions",
+            ]
+        )
+        for episode, start_smiles in enumerate(trainer.sampler.eval_starts()):
+            current = str(start_smiles)
+            initial_qed = _qed(current, round_digits=trainer.qed_round_digits)
+            num_reactions = 0
+            with torch.no_grad():
+                for _ in range(trainer.max_episode_len + int(trainer.use_stop_action)):
+                    at_max = num_reactions >= trainer.max_episode_len
+                    if at_max and not trainer.use_stop_action:
+                        break
+                    masked_logits, _, mask = trainer._forward_single(
+                        current, force_stop=at_max
+                    )
+                    if not bool(mask.any()):
+                        break
+                    action = int(torch.argmax(masked_logits).item())
+                    if action == trainer.stop_index:
+                        break
+                    product = trainer.reaction_manager.apply_reaction(
+                        current, trainer.reaction_manager.templates[action], None
+                    )
+                    if product is None:
+                        break
+                    current = product
+                    num_reactions += 1
+            final_qed = _qed(current, round_digits=trainer.qed_round_digits)
+
+            if 0 <= num_reactions <= max_step:
+                values[num_reactions].append(final_qed)
+            writer.writerow(
+                [
+                    "GraphTransPPO",
+                    episode,
+                    start_smiles,
+                    current,
+                    initial_qed,
+                    final_qed,
+                    num_reactions,
+                ]
+            )
+    return values
+
+
 def quantile(values: list[float], q: float) -> float:
     ordered = sorted(values)
     return ordered[round((len(ordered) - 1) * q)]
@@ -476,10 +585,13 @@ def plot_boxplots(
     grouped_values: dict[str, dict[int, list[float]]],
     max_step: int,
 ) -> None:
+    # 16:9 figure tuned for full-bleed slides at 1920x1080 (16x9 in @120 dpi).
+    # Each step subplot is therefore ~2.66" wide for max_step=5, which is
+    # enough for the 7 method boxes once we shrink them below.
     fig, axes = plt.subplots(
         1,
         max_step + 1,
-        figsize=(3.3 * (max_step + 1), 4.8),
+        figsize=(16, 9),
         sharey=True,
         constrained_layout=True,
     )
@@ -487,7 +599,10 @@ def plot_boxplots(
         axes = [axes]
 
     n_methods = len(METHODS)
-    spacing = 0.12
+    # Narrower boxes with a touch more horizontal spacing so all 7 methods
+    # remain visually separated even though each step subplot is thinner.
+    spacing = 0.11
+    box_width = 0.07
     half_span = (n_methods - 1) * spacing / 2.0
     all_positions = [1.0 + (i - (n_methods - 1) / 2.0) * spacing for i in range(n_methods)]
     position_by_method = dict(zip(METHODS, all_positions))
@@ -505,45 +620,52 @@ def plot_boxplots(
         box = axis.boxplot(
             data,
             positions=positions,
-            widths=0.12,
+            widths=box_width,
             patch_artist=True,
             showfliers=False,
-            medianprops={"color": "black", "linewidth": 1.4},
-            boxprops={"linewidth": 1.0},
-            whiskerprops={"linewidth": 1.0},
-            capprops={"linewidth": 1.0},
+            medianprops={"color": "black", "linewidth": 1.2},
+            boxprops={"linewidth": 0.9},
+            whiskerprops={"linewidth": 0.9},
+            capprops={"linewidth": 0.9},
         )
         for patch, (method, _) in zip(box["boxes"], present):
             patch.set_facecolor(COLORS[method])
             patch.set_alpha(0.72)
 
         if step == 0:
-            axis.set_title("No action")
+            axis.set_title("No action", fontsize=12)
         else:
-            axis.set_title(f"After {step} reaction{'s' if step > 1 else ''}")
-        axis.set_xlabel("Method")
+            axis.set_title(
+                f"After {step} reaction{'s' if step > 1 else ''}", fontsize=12
+            )
+        axis.set_xlabel("Method", fontsize=10)
         axis.set_xlim(*xlim)
         axis.set_xticks(all_positions)
-        axis.set_xticklabels(METHODS)
-        axis.tick_params(axis="x", rotation=30)
+        axis.set_xticklabels(
+            [DISPLAY_NAMES[m] for m in METHODS], fontsize=8, rotation=45, ha="right"
+        )
+        axis.tick_params(axis="y", labelsize=9)
         axis.grid(axis="y", alpha=0.25)
         for method in METHODS:
             idx = position_by_method[method]
             values = grouped_values[method][step]
+            # Vertical orientation keeps the per-method n labels readable when
+            # 7 methods sit inside a thin 16:9 subplot.
             axis.text(
                 idx,
-                0.02,
-                f"n={len(values)}\nvalues",
+                0.015,
+                f"n={len(values)}",
                 ha="center",
                 va="bottom",
-                fontsize=8,
+                rotation=90,
+                fontsize=7,
                 transform=axis.get_xaxis_transform(),
             )
 
-    axes[0].set_ylabel("QED")
+    axes[0].set_ylabel("QED", fontsize=11)
     fig.suptitle(
         "Final-molecule QED distributions by reaction count",
-        fontsize=14,
+        fontsize=16,
     )
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
@@ -583,6 +705,11 @@ def main() -> None:
         default=repo_root / "runs/np18l9uf/td3_checkpoints/final_model.pth",
     )
     parser.add_argument(
+        "--graphtransppo-model",
+        type=Path,
+        default=repo_root / "runs/v855kfxl/best_model.pt",
+    )
+    parser.add_argument(
         "--ppo-config",
         type=Path,
         default=repo_root / "configs/ppo_uni_masked_delta_qed.yaml",
@@ -598,6 +725,11 @@ def main() -> None:
         default=repo_root / "configs/td3_uni_continuous_masked_delta_qed.yaml",
     )
     parser.add_argument(
+        "--graphtransppo-config",
+        type=Path,
+        default=repo_root / "configs/graphtransppo_uni_delta_qed.yaml",
+    )
+    parser.add_argument(
         "--ppo-cache",
         type=Path,
         default=repo_root / "visualization/ppo_06mjmn3t_eval_trajectories.csv",
@@ -611,6 +743,11 @@ def main() -> None:
         "--td3-cache",
         type=Path,
         default=repo_root / "visualization/td3_np18l9uf_eval_trajectories.csv",
+    )
+    parser.add_argument(
+        "--graphtransppo-cache",
+        type=Path,
+        default=repo_root / "visualization/graphtransppo_v855kfxl_eval_trajectories.csv",
     )
     parser.add_argument("--max-step", type=int, default=5)
     parser.add_argument(
@@ -647,6 +784,13 @@ def main() -> None:
             model_path=args.ppo_model,
             config_path=args.ppo_config,
             cache_path=args.ppo_cache,
+            max_step=args.max_step,
+        ),
+        "GraphTransPPO": evaluate_graphtransppo_policy(
+            repo_root=repo_root,
+            model_path=args.graphtransppo_model,
+            config_path=args.graphtransppo_config,
+            cache_path=args.graphtransppo_cache,
             max_step=args.max_step,
         ),
         "A2C": evaluate_sb3_policy(
