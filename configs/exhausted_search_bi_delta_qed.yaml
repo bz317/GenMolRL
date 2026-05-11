@@ -1,7 +1,20 @@
 project: GenMolRL_Bi
 experiment_name: ExhaustedSearch_Bi
 reaction_mode: bi
-masking: reaction_valid
+# Use r2_available for the template mask (R1 match + ≥1 pattern-compatible
+# R2 in the pool). This gives *identical* exhaustive coverage to
+# reaction_valid in this search (because `_candidate_products` always runs
+# apply_reaction on every pattern-compatible R2 anyway, so templates that
+# pass r2_available but produce zero sanitised products simply contribute
+# zero next-actions). The only difference is that reaction_valid runs
+# apply_reaction once per (state, T, R2) at mask-build time *and again*
+# during candidate enumeration — doubling RDKit cost per visited state
+# without changing the set of expanded paths. Under bi+reaction_valid+
+# no caps, building the first state's mask alone can take many hours;
+# this run was previously stuck at zero saved paths after 17 h on a 36 h
+# wallclock. r2_available drops the mask-time scan and lets the DFS save
+# leaves on a useful cadence.
+masking: r2_available
 reward: delta_qed
 # Fully exhaustive bi-reaction DFS: every (template, R2) branch is expanded
 # from every starting molecule in reactants_test.pkl, up to depth 5. The
@@ -9,7 +22,11 @@ reward: delta_qed
 # template), which for our 102 bi-templates and ~10^3 typical valid R2 per
 # template means each start can spawn ~10^5-10^10 paths at depth 5. This
 # run can therefore take a very long time; the slurm wallclock (36 h) and
-# wandb's per-attempt logging provide the only soft stops.
+# wandb's per-attempt logging provide the only soft stops. State-visit
+# heartbeats land in stdout every `search.state_heartbeat_every` visits and
+# the frontier path is snapshotted to `<results>.inprogress.tmp` every
+# `search.inprogress_snapshot_every` visits so progress is observable on
+# disk and in the slurm log even before any leaf is saved.
 max_episode_len: 5
 dataset:
   test_file: data/Bi/reactants_test.pkl

@@ -1,6 +1,6 @@
 """Smoke test: confirm Bi-PPO env can actually execute bi-reactions end-to-end.
 
-Mirrors the runtime configuration of `configs/ppo_bi_masked_delta_qed.yaml`:
+Mirrors the runtime configuration of `configs/ppo_bi_multidiscrete_delta_qed.yaml`:
   - reaction_mode = "bi"
   - algorithm_family = "sb3_multidiscrete"
   - masking = "reaction_valid"   (the previously buggy mask we just fixed)

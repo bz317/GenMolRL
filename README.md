@@ -1,16 +1,25 @@
 # GenMolRL
 
-GenMolRL is the unified molecule-generation project for the current PPO, A2C, TD3/PGFS, and GraphTransRL experiments. It replaces the previous workflow where PPO/A2C and TD3 were launched from different branch directories with duplicated environment, masking, data staging, reward, and logging logic.
+GenMolRL is the unified molecule-generation project for the current PPO, A2C, TD3/PGFS, GraphTransRL, GraphTransPPO, and Bi-PPO experiments. It replaces the previous workflow where PPO/A2C and TD3 were launched from different branch directories with duplicated environment, masking, data staging, reward, and logging logic.
 
 The first goal is behavior-compatible migration of:
 
 - `exp_branch_run_PPO_mask_extendedObs.sh`
 - `exp_branch_run_A2C_mask.sh`
 - `run_td3.sh`
-- Random Search, Greedy Search, and Exhausted Search baselines
+- Random Search, Greedy Search, and Exhausted Search baselines (both uni and bi reaction modes)
 - GraphTransRL with a graph-transformer policy backbone
 
-The second goal is to provide a structured place for future methods such as REINVENT scaffold decorator.
+The second goal is to host new methods built on top of the shared
+environment / masking / staging stack:
+
+- **GraphTransPPO** — graph-transformer backbone with PPO (clipped surrogate
+  + value baseline) instead of the GraphTransRL trajectory-balance loss.
+- **Bi-PPO** — two trainers for Bi reaction mode (one `MultiDiscrete([T, R2])`
+  on top of SB3 `MaskablePPO`, one hand-rolled hierarchical / multidiscrete
+  trainer).
+- Future methods such as REINVENT scaffold decorator slot in via the same
+  `genmolrl/methods` adapter pattern.
 
 ## Layout
 
@@ -19,8 +28,8 @@ GenMolRL/
   genmolrl/
     chem/          # RDKit reactions, fingerprints, product selection, dataset staging
     envs/          # unified molecule-design Gymnasium env, masks, rewards, starts
-    algorithms/    # PPO, A2C, TD3/PGFS, SynFlowNet trainers
-                   # plus random and greedy search baselines
+    algorithms/    # PPO, A2C, TD3/PGFS, GraphTransRL, GraphTransPPO, ppo_bi trainers
+                   # plus random / greedy / exhausted search baselines
     logging/       # W&B metrics and callbacks
     methods/       # lazy method adapters
     scripts/       # unified CLI entry points
@@ -154,15 +163,19 @@ That directory is intentionally empty for now. The spelling `unimolecolar` is pr
 Use the wrapper scripts from the repository root:
 
 ```bash
-./run_genmolrl_ppo.sh
-./run_genmolrl_a2c.sh
-./run_genmolrl_td3_continuous.sh   # uni TD3, PGFS continuous R2 head
-./run_genmolrl_td3_discrete.sh      # uni TD3, template-only critic
-./run_genmolrl_td3.sh               # alias → continuous (backward compatible)
+./run_genmolrl_ppo.sh                # uni PPO (MaskablePPO Discrete)
+./run_genmolrl_a2c.sh                # uni A2C
+./run_genmolrl_td3_continuous.sh     # uni TD3, PGFS continuous R2 head
+./run_genmolrl_td3_discrete.sh       # uni TD3, template-only critic
+./run_genmolrl_td3.sh                # alias → continuous (backward compatible)
+./run_genmolrl_graphtransrl.sh             # uni GraphTransRL (trajectory balance)
+./run_genmolrl_graphtransppo.sh            # uni GraphTransPPO (PPO over the graph backbone)
+./run_genmolrl_ppo_bi_multidiscrete.sh     # bi PPO, SB3 MaskablePPO + MultiDiscrete([T+1, R2])
+./run_genmolrl_ppo_bi_hierarchical.sh      # bi PPO, hand-rolled trainer with π(T)·π(R2|s,T)
 ./run_genmolrl_random_search.sh
 ./run_genmolrl_greedy_search.sh
-./run_genmolrl_exhausted_search.sh
-./run_genmolrl_graphtransrl.sh
+./run_genmolrl_exhausted.sh          # uni exhaustive enumeration
+./run_genmolrl_exhausted_bi.sh       # bi exhaustive enumeration (per-path streaming)
 ```
 
 Or call the unified launcher directly:
@@ -391,6 +404,86 @@ Run it with:
 ./run_genmolrl_graphtransrl.sh
 ```
 
+### GraphTransPPO
+
+`graphtransppo` swaps the GraphTransRL trajectory-balance loss for a hand-
+rolled PPO objective (clipped surrogate, GAE, value baseline, target-KL
+early stop) over the *same* graph-transformer backbone (`GENConv` +
+`TransformerConv`). A small value head is attached to the trunk so the
+critic and policy share the encoder; the action head is the original
+graph-attention readout over templates + Stop. Default config is
+`configs/graphtransppo_uni_delta_qed.yaml` with `masking: reaction_valid`,
+`reward: delta_qed`, and PPO knobs tuned to match `ppo_uni_masked_delta_qed.yaml`
+so any GraphTransPPO ↔ PPO_Uni delta is attributable to the encoder rather
+than the learning rule.
+
+Run it with:
+
+```bash
+./run_genmolrl_graphtransppo.sh
+```
+
+Currently uni-only. Bi support would require extending the graph readout to
+produce a `(T, R2)` joint distribution; not implemented.
+
+### PPO Bi-reaction
+
+Two trainers / launchers exist for Bi reaction mode:
+
+1. **`run_genmolrl_ppo_bi_multidiscrete.sh`** →
+   `--algorithm ppo` + config `configs/ppo_bi_multidiscrete_delta_qed.yaml`.
+   Uses SB3 `MaskablePPO` with action space
+   `MultiDiscrete([num_templates + 1, num_reactants])`. Template and R2
+   are sampled independently. The action mask is provided through
+   `env.action_masks()` (not appended to the observation, to keep the
+   ~1024-dim Morgan FP small).
+
+2. **`run_genmolrl_ppo_bi_hierarchical.sh`** →
+   `--algorithm ppo_bi` + config `configs/ppo_bi_hierarchical_delta_qed.yaml`.
+   Hand-rolled PPO trainer that supports two policy architectures via the
+   `ppo_bi.policy_arch` field:
+   - `hierarchical` (default): `π(T, R2 | s) = π_T(T | s) · π_R2(R2 | s, T)`.
+     The R2 head is conditioned on the sampled template via a learned per-T
+     embedding; the R2 mask is per-(state, T).
+   - `multidiscrete`: matches the SB3 parameterisation but lives in the
+     same hand-rolled trainer (`π(T) · π(R2)`, R2 mask is the per-state
+     union over valid templates). Useful as a within-trainer ablation
+     against the autoregressive default.
+
+Masking semantics follow the README contract (see *Masking Modes*
+below). Both launchers default to `masking=r2_available` for
+wallclock-cheap training. Set `MASKING=reaction_valid` to enable the
+zero-`invalid_reaction_penalty` contract:
+
+- The multidiscrete launcher under `reaction_valid` benefits from the
+  bi-aware `template_reaction_valid_mask` (`R1 match + ∃R2 in pool`) on
+  the template axis, but `MaskablePPO` does not enforce joint
+  `(T, R2)` validity — independent sampling can still emit `-1`.
+- The hierarchical launcher under `reaction_valid` uses
+  `ReactionManager.bi_r2_valid_mask` for the per-(state, T) R2 mask, so
+  every sampled `(T, R2)` produces a sanitised product — zero `-1` by
+  mask construction. The hand-rolled trainer's `multidiscrete` arch
+  adds an online joint-rejection loop to preserve the same contract.
+
+`substructure` and `r2_available` are pattern-only and explicitly allow
+rare `apply_reaction` failures to surface as `-1` transitions for the
+policy to learn from.
+
+Run them with:
+
+```bash
+./run_genmolrl_ppo_bi_multidiscrete.sh                          # SB3 MaskablePPO MultiDiscrete, r2_available
+./run_genmolrl_ppo_bi_hierarchical.sh                           # hand-rolled BiPPO Hierarchical, r2_available
+MASKING=reaction_valid ./run_genmolrl_ppo_bi_hierarchical.sh    # zero -1 contract
+```
+
+Corresponding SLURM scripts live in `HPC_scripts/bi/`:
+
+```bash
+sbatch HPC_scripts/bi/slurm_genmolrl_gpu_ppo_multidiscrete
+sbatch HPC_scripts/bi/slurm_genmolrl_gpu_ppo_hierarchical
+```
+
 ### Random Search
 
 `random_search` is a non-neural baseline. It goes through `dataset.test_file` one molecule at a time, matching evaluation order. For each test start molecule, at each step:
@@ -440,7 +533,18 @@ GREEDY_MODE=positive_delta_only ./run_genmolrl_greedy_search.sh
 - there is no valid next action from the current molecule, or
 - the trajectory reaches `max_episode_len`.
 
-By default, the exhaustive config leaves `max_paths`, `max_reactions`, `max_starts`, and `max_r2_per_template` unset, so it attempts the full search space. This can become very large, especially for Bi mode. Set those fields in the config for a bounded debug run.
+By default, the exhaustive config leaves `max_paths`, `max_reactions`, `max_starts`, and `max_r2_per_template` unset, so it attempts the full search space. This can become very large, especially for Bi mode (under bi `reaction_valid` masking, the average start molecule has on the order of 10² R1-feasible templates × 10³–10⁴ pattern-compatible R2 partners per template at depth 1 alone). Set those fields in the config for a bounded debug run.
+
+Trajectories are streamed to the on-disk results file **per path** as the
+search progresses (rather than buffered in RAM until the run finishes),
+so progress is observable in `runs/exhausted_search_{uni,bi}_results.txt`
+during long bi runs and the process can be safely interrupted without
+losing completed paths. Run them with:
+
+```bash
+./run_genmolrl_exhausted.sh       # uni
+./run_genmolrl_exhausted_bi.sh    # bi
+```
 
 Search stopping controls:
 
@@ -477,13 +581,24 @@ Uses all available templates:
 - `unimolecular_explicit_reagent`
 - `bimolecular`
 
-For PPO/A2C, Bi currently preserves the requested old-style factorized action design:
+For PPO/A2C, Bi has two action parameterisations:
 
-```text
-MultiDiscrete([T, R2])
-```
+1. **`MultiDiscrete([T, R2])`** (default for `--algorithm ppo` +
+   `algorithm_family: sb3_multidiscrete`). Template `T` and second
+   reactant `R2` are separate categorical action heads, sampled
+   independently. The R2 choice is not conditioned on the sampled template
+   inside the policy distribution.
 
-This means template `T` and second reactant `R2` are separate categorical action heads. The R2 choice is not conditioned on the sampled template inside the policy distribution. This is preserved for compatibility and should be treated as a baseline implementation, not the final ideal Bi action design.
+2. **Hierarchical `π(T) · π(R2 | T)`** (`--algorithm ppo_bi` +
+   `ppo_bi.policy_arch: hierarchical`). The R2 head reads a learned
+   per-template embedding, so it can express template-conditional R2
+   preferences. The R2 mask is per-`(state, T)` rather than per-state.
+
+The same `ppo_bi` trainer also exposes `policy_arch: multidiscrete`,
+which matches parameterisation (1) but lives in the hand-rolled trainer
+so PPO accounting (GAE, clipped surrogate, value clipping, target_kl
+early stop, explained-variance logging) is identical to GraphTransPPO
+and source-of-truth comparable to the MaskablePPO Bi run.
 
 For TD3/PGFS, Bi uses the PGFS decomposition:
 
@@ -507,13 +622,37 @@ The last action is Stop when `use_stop_action=true`.
 
 ### `sb3_multidiscrete`
 
-Used by PPO/A2C Bi compatibility mode.
+Used by PPO/A2C Bi compatibility mode (`--algorithm ppo` with
+`configs/ppo_bi_multidiscrete_delta_qed.yaml`).
 
 ```text
 MultiDiscrete([num_templates + 1, num_reactants])
 ```
 
 The first component is template/Stop. The second component is the R2 index. For uni templates, R2 is ignored.
+
+### `ppo_bi_hierarchical`
+
+Used by the hand-rolled BiPPO trainer (`--algorithm ppo_bi`). The trainer
+*does not* construct a Gymnasium env; instead it consumes the same
+`env.*` fields (`use_stop_action`, `invalid_reaction_penalty`,
+`stop_early_penalty`, `stop_penalty_until_step`, `reward_round_digits`,
+`info_qed_round_digits`) and operates over the same SMILES action triple
+`(state, T, R2)` as `MoleculeDesignEnv`, but the policy emits the joint
+`(T, R2)` directly. Two architectures are supported via
+`ppo_bi.policy_arch`:
+
+- `hierarchical`: autoregressive `π_T(T | s) · π_R2(R2 | s, T)`.
+- `multidiscrete`: independent `π_T(T | s) · π_R2(R2 | s)`.
+
+### `graphtransppo`
+
+Used by GraphTransPPO (`--algorithm graphtransppo`). Action space is
+`Discrete(num_templates + 1)` like `sb3_discrete`, but the env builds a
+PyG graph observation (`reaction_graph_action` design) so the policy and
+value heads can be applied on the graph-transformer trunk directly. Bi
+support would require a joint `(T, R2)` readout on top of the graph
+encoder and is not currently implemented.
 
 ### `td3_pgfs`
 
@@ -547,6 +686,21 @@ Use **`run_genmolrl_td3_continuous.sh`** or **`run_genmolrl_td3_discrete.sh`** f
 
 Masking controls which template actions are considered legal before the policy samples/selects an action. Stop is appended separately when enabled.
 
+Each masking mode comes with a contract about whether `apply_reaction`
+failures (RDKit kekulisation / sanitisation pathologies, or — for bi
+templates — no valid R2 pairing) are allowed to surface as
+`invalid_reaction_penalty` (-1) at env-step time. The summary table:
+
+| Mask | Template-axis check | R2-axis check (bi only) | Runs `apply_reaction` at mask time? | `-1` allowed at step time? |
+|---|---|---|---|---|
+| `none` | none | none | no | yes |
+| `substructure` | R1 SMARTS match | none | no | yes |
+| `r2_available` | R1 SMARTS match | ≥1 R2 in pool pattern-matches the R2 slot | no | yes |
+| `reaction_valid` | R1 match + RDKit produces a sanitised product (uni: with R2=None; bi: with some pool R2) | the per-(state, T) RDKit-validated R2 set (for bi-aware consumers) | yes (expensive for bi) | **no** |
+
+The mask kind is selected by the top-level `masking` field in the YAML
+and overridable from the wrapper scripts via `MASKING=<kind>`.
+
 ### `none`
 
 No template validation at mask time.
@@ -559,7 +713,10 @@ Invalid reactions may still fail in `env.step()` and receive `invalid_reaction_p
 
 ### `substructure`
 
-A template is valid if the current molecule matches the first-reactant SMARTS pattern.
+A template is valid iff the current molecule matches the first-reactant
+SMARTS pattern. Uni and bi templates are treated the same way — the bi
+case does **not** add an R2 availability check (that's `r2_available`'s
+job).
 
 Validation:
 
@@ -573,26 +730,11 @@ Implementation uses:
 mol.HasSubstructMatch(reaction.GetReactantTemplate(0), useChirality=True)
 ```
 
-This does not run the reaction. A template can pass this mask but still fail later if RDKit cannot generate a valid product.
-
-### `reaction_valid`
-
-A template is valid if:
-
-1. The current molecule matches the first-reactant SMARTS pattern.
-2. RDKit can run the reaction with no selected second reactant.
-3. The first product sanitizes successfully.
-4. A valid product SMILES is returned.
-
-Validation:
-
-```text
-first-reactant match AND apply_reaction(R1, template, None) returns a sanitized product
-```
-
-This is the exact original PPO/A2C Uni masking behavior from `exp_branch_run_PPO_mask_extendedObs.sh` and `exp_branch_run_A2C_mask.sh`.
-
-For true bimolecular templates, this usually returns invalid unless the template encodes a fixed explicit reagent, because no learned/selected R2 is supplied at mask time.
+This does not run the reaction. A template can pass this mask and still
+fail at step time when `apply_reaction` cannot sanitise the product (or,
+for bi templates, when the sampled R2 is structurally incompatible with
+the R2 SMARTS slot). Those failures are recorded as `-1` transitions so
+the policy learns from the failure signal.
 
 ### `r2_available`
 
@@ -600,7 +742,8 @@ A template is valid if:
 
 1. The current molecule matches the first-reactant SMARTS pattern.
 2. If the template is unimolecular, the template is valid.
-3. If the template is bimolecular, at least one reactant in the pool matches the second-reactant SMARTS pattern.
+3. If the template is bimolecular, at least one reactant in the pool
+   matches the second-reactant SMARTS pattern.
 
 Validation:
 
@@ -609,21 +752,96 @@ uni valid = first-reactant match
 bi valid = first-reactant match AND at least one valid R2 exists
 ```
 
-This does not run every full `R1 + R2 -> product` reaction at mask time. It is the PGFS/TD3-style feasibility check because TD3 chooses R2 later through the continuous R2/KNN mechanism.
+This does not run any full `R1 + R2 -> product` reaction at mask time;
+the R2 check is a SMARTS pattern match, not a sanitisation run. Pattern
+matching does *not* guarantee a sanitised product, so `apply_reaction`
+may still fail at step time — those rare failures are recorded as `-1`
+transitions, identical to `substructure`.
+
+`r2_available` is the PGFS/TD3-style feasibility check (TD3 picks R2
+later via the continuous KNN mechanism), and is also the default Bi-PPO
+masking — cheap to compute, and the residual `-1` rate is a useful
+training signal.
+
+### `reaction_valid`
+
+A template is valid if:
+
+- **Uni templates** (`unimolecular`, `unimolecular_explicit_reagent`):
+  1. The current molecule matches the first-reactant SMARTS pattern.
+  2. `apply_reaction(R1, template, None)` returns a sanitised product
+     SMILES.
+- **Bi templates** (`bimolecular`):
+  1. The current molecule matches the first-reactant SMARTS pattern.
+  2. There exists some `R2` in `dataset.training_file` (the reactant
+     pool) such that `apply_reaction(R1, template, R2)` returns a
+     sanitised product. `R2=None` is tried first so bi templates that
+     bake fixed reagents into `_explicit_reagents` short-circuit without
+     scanning the pool.
+
+Validation:
+
+```text
+uni: first-reactant match AND apply_reaction(state, T, None) returns a sanitized product
+bi:  first-reactant match AND ∃ R2 in pool s.t. apply_reaction(state, T, R2) returns a sanitized product
+```
+
+The uni branch is the exact original PPO/A2C Uni masking behavior from
+`exp_branch_run_PPO_mask_extendedObs.sh` and `exp_branch_run_A2C_mask.sh`
+(in uni mode the manager only holds uni-type templates, so the bi branch
+is unreachable and the mask is bit-identical to the pre-Bi-fix
+implementation).
+
+The bi branch is the strict counterpart used by Bi-PPO when zero `-1`
+rewards are required:
+
+- **Hierarchical Bi-PPO** (`ppo_bi.policy_arch: hierarchical`) reads the
+  per-(state, T) RDKit-validated R2 mask from
+  `ReactionManager.bi_r2_valid_mask(state, t)` and is therefore zero-`-1`
+  by mask construction; no rejection sampling is needed.
+- **Multidiscrete Bi-PPO** (`ppo_bi.policy_arch: multidiscrete`) samples
+  T and R2 independently from a per-state R2 union mask, which can pair
+  an R2 with a template it doesn't actually work for. To keep the
+  zero-`-1` contract, the trainer runs online joint rejection sampling
+  (`ppo_bi.r2_resample_retries` retries; budget exhaustion falls through
+  to STOP rather than violate the contract).
+
+The bi-mask cost is non-trivial: each cache-cold `(state, T)` pays one
+`apply_reaction` per pattern-matched R2 candidate. The values are cached
+per `(state, T)` and per `(state, "reaction_valid")` template mask, so
+amortised cost is fine for long training runs but can dominate quick
+smoke tests. Use `r2_available` or `substructure` if the `-1` signal is
+acceptable.
 
 ## Default Masking By Algorithm
 
 The current default configs use:
 
 ```text
-PPO Uni: reaction_valid
-A2C Uni: reaction_valid
-TD3 Uni: r2_available
+PPO Uni:                       reaction_valid
+A2C Uni:                       reaction_valid
+GraphTransRL Uni:              reaction_valid
+GraphTransPPO Uni:             reaction_valid
+TD3 Uni:                       r2_available
+PPO Bi MultiDiscrete (SB3):    r2_available    (override: MASKING=reaction_valid)
+PPO Bi Hierarchical (BiPPO):   r2_available    (override: MASKING=reaction_valid → zero -1)
+Random / Greedy / Exhausted (Uni/Bi):  reaction_valid (config-driven; can be overridden)
 ```
 
-PPO/A2C use `reaction_valid` to exactly match the original experiments-branch Uni runs.
+PPO/A2C/GraphTrans* use `reaction_valid` for uni runs to exactly match the
+original experiments-branch Uni runs and to keep the policy's training
+signal clean of `-1` outliers.
 
-TD3 uses `r2_available` to preserve PGFS-style template feasibility and keep R2/KNN handling separate.
+TD3 uses `r2_available` to preserve PGFS-style template feasibility and
+keep R2/KNN handling separate.
+
+Bi-PPO defaults to `r2_available` for wallclock-cheap training; flip to
+`reaction_valid` (e.g.
+`MASKING=reaction_valid ./run_genmolrl_ppo_bi_hierarchical.sh`)
+when zero `invalid_reaction_penalty` rewards in recorded transitions is
+a requirement. The same override on the multidiscrete launcher uses the
+fixed bi-aware template mask but does not enforce joint `(T, R2)`
+validity at SB3 sampling time.
 
 ## Reward Modes
 
@@ -726,11 +944,31 @@ qed_per_step
 overall_max_qed
 ```
 
+Bi-PPO additionally exposes:
+
+```text
+train/invalid_reaction_count        # cumulative -1 transitions
+train/rollout_invalid_count_cum     # snapshot per rollout
+train/rejection_count_cum           # joint-rejection retries (multidiscrete + reaction_valid only)
+train/stop_event_count              # cumulative STOP actions chosen
+train/rollout_stop_fraction         # STOP fraction per rollout
+```
+
+Under `masking=reaction_valid` the two `invalid_*` counters must stay at
+0 throughout training (the contract is enforced by an `assert` in the
+rollout). Under `substructure` / `r2_available` they grow naturally —
+those modes deliberately allow `apply_reaction` failures to surface as
+`-1` transitions for the policy to learn from.
+
 Outputs are written under:
 
 ```text
 runs/<run_id>/
 ```
+
+Bi exhaustive search additionally writes streaming results to
+`runs/exhausted_search_bi_results.txt` (per-path append; safe to tail
+during a run and safe to interrupt without losing completed paths).
 
 ## Compatibility Notes
 
@@ -738,6 +976,12 @@ runs/<run_id>/
 - Template insertion order is preserved from the pickle so action indices match legacy behavior.
 - PPO/A2C reward and info QED rounding are configurable and default to 3 decimals in compatibility configs.
 - TD3 reuses the existing custom PGFS TD3 agent/replay/KNN implementation through adapters while GenMolRL owns the config, environment, staging, and launcher.
+- The bi-branch of `ReactionManager.template_reaction_valid_mask` is uni-unreachable: in `reaction_mode: uni` only uni-type templates are registered, so the uni-mode `reaction_valid` mask is bit-identical to the pre-Bi-fix implementation. Uni runs are therefore behaviour-compatible with all earlier PPO/A2C numbers.
+- GraphTransPPO and Bi-PPO are new trainers (not migrations); they reuse
+  the GenMolRL `ReactionManager`, masking, reward, dataset staging, and
+  W&B logging stack, but their PPO accounting is hand-rolled rather than
+  delegated to SB3 so the rollout/eval cadence and explained-variance
+  logging are directly source-of-truth comparable across the two.
 
 ## Smoke Checks
 

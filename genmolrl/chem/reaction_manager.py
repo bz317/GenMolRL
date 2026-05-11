@@ -129,7 +129,19 @@ class ReactionManager:
             return {"first": False, "second": False}
 
     def template_substructure_mask(self, reactant: str | None) -> torch.Tensor:
-        """Validate templates only by RDKit first-reactant substructure match."""
+        """Pure pattern-only template mask: R1 first-reactant substructure match.
+
+        Bit-identical to the legacy behaviour for both uni and bi templates.
+        Per the README contract: this does not run the reaction and does not
+        inspect R2 availability. A template can pass this mask and still fail
+        ``apply_reaction`` later (RDKit kekulisation/sanitisation quirks,
+        missing R2 for bi templates) — those failures are intended to surface
+        as ``invalid_reaction_penalty`` (-1) at env-step time.
+
+        ``r2_available`` is the masking type that *does* add the bi-R2 pattern
+        check; ``reaction_valid`` is the masking type that guarantees no -1
+        via a full apply_reaction validation.
+        """
         key = (reactant, "substructure")
         if key not in self.template_mask_cache:
             values = [int(self.match_template(reactant, t)["first"]) for t in self.templates.values()]
@@ -234,3 +246,40 @@ class ReactionManager:
             if smiles in valid:
                 mask[i] = 1
         return mask
+
+    def bi_r2_valid_mask(self, state: str | None, template_index: int) -> np.ndarray:
+        """True-validity R2 mask for hierarchical Bi-PPO sampling.
+
+        Returns a ``(len(reactants),)`` int8 mask where index ``i`` is 1 iff
+        ``apply_reaction(state, templates[template_index], reactants[i])`` returns
+        a sanitised product. The pattern-match set from ``get_valid_reactants`` is
+        a strict superset; we filter it through RDKit so the policy can never
+        sample a (T, R2) pair that the env would reject. Cached per (state, t).
+
+        For uni-type templates or null states the result is a zero mask; callers
+        should not invoke this for uni templates because the action space is
+        single-Discrete in uni mode.
+        """
+        cache = getattr(self, "_bi_r2_valid_cache", None)
+        if cache is None:
+            cache = {}
+            self._bi_r2_valid_cache = cache
+        key = (state, int(template_index))
+        cached = cache.get(key)
+        if cached is not None:
+            return cached.copy()
+        mask = np.zeros(len(self.reactants), dtype=np.int8)
+        template = self.templates.get(int(template_index))
+        if state is None or template is None or template.get("type") != BI_TYPE:
+            cache[key] = mask
+            return mask.copy()
+        partners = set(self.get_valid_reactants(int(template_index)))
+        if partners:
+            reactant_keys = list(self.reactants.keys()) if isinstance(self.reactants, dict) else list(self.reactants)
+            partner_indices = [i for i, smi in enumerate(reactant_keys) if smi in partners]
+            for i in partner_indices:
+                r2 = reactant_keys[i]
+                if self.apply_reaction(state, template, r2) is not None:
+                    mask[i] = 1
+        cache[key] = mask
+        return mask.copy()

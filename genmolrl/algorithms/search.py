@@ -132,6 +132,20 @@ class SearchRunner:
         self._stream_flush_every_paths: int = int(self.search_cfg.get("flush_every_paths", 1))
         # How often to print a path-level stdout heartbeat (in paths).
         self._stream_path_heartbeat_every: int = int(self.search_cfg.get("path_heartbeat_every", 100))
+        # How often to print an intra-DFS state-visit heartbeat (in state visits).
+        # Critical for bi-mode under masking=reaction_valid where each state visit
+        # is expensive enough that no `save_terminal` may fire for hours.
+        # Set to 0 to disable.
+        self._stream_state_heartbeat_every: int = int(
+            self.search_cfg.get("state_heartbeat_every", 100)
+        )
+        # When set, write a snapshot of the *currently-explored* path-so-far to
+        # `<result_file>.inprogress.tmp` every N state visits. This makes the
+        # search frontier observable on disk even when no leaf has been saved.
+        # Set to 0 to disable.
+        self._stream_inprogress_every: int = int(
+            self.search_cfg.get("inprogress_snapshot_every", 100)
+        )
 
     def _optional_int(self, key: str, default: int | None) -> int | None:
         value = self.search_cfg.get(key, default)
@@ -270,6 +284,9 @@ class SearchRunner:
             traj_tmp.unlink(missing_ok=True)
         if steps_tmp is not None:
             steps_tmp.unlink(missing_ok=True)
+        # The frontier snapshot is only useful while the search is running.
+        inprogress = self.result_file.with_suffix(".inprogress.tmp")
+        inprogress.unlink(missing_ok=True)
 
     def _reached_limit(self, saved_paths: int, total_reactions: int) -> bool:
         if self.max_paths is not None and saved_paths >= self.max_paths:
@@ -427,6 +444,8 @@ class SearchRunner:
         starts_seen = 0
         total_reactions = 0
         best_qed = 0.0
+        state_visits = 0
+        last_heartbeat_t = 0.0
 
         # Sidecar files for streaming output. Created fresh per run so a partial run still
         # leaves a readable on-disk record (concatenated into the main report on completion).
@@ -434,8 +453,11 @@ class SearchRunner:
         # therefore grows continuously regardless of how deep/wide a single start's DFS is.
         self._stream_paths = self.result_file.with_suffix(".steps.tmp")
         self._stream_trajs = self.result_file.with_suffix(".trajectories.tmp")
+        # Frontier snapshot: holds the *current* trajectory being explored, even
+        # before any leaf has been saved. Overwritten on every snapshot.
+        inprogress_file = self.result_file.with_suffix(".inprogress.tmp")
         self._stream_paths.parent.mkdir(parents=True, exist_ok=True)
-        for p in (self._stream_paths, self._stream_trajs):
+        for p in (self._stream_paths, self._stream_trajs, inprogress_file):
             if p.exists():
                 p.unlink()
 
@@ -444,6 +466,25 @@ class SearchRunner:
         # Using a mutable container lets us define save_terminal/dfs before the `with`
         # block opens the files, keeping the existing dfs recursion intact.
         handles: dict[str, "object"] = {"steps": None, "traj": None}
+
+        def write_inprogress(path_rows: list[SearchStep]) -> None:
+            try:
+                with inprogress_file.open("w", encoding="utf-8") as f:
+                    f.write(
+                        f"# in-progress frontier (live, last update t={time.monotonic() - run_start:.0f}s)\n"
+                    )
+                    f.write(
+                        f"# state_visits={state_visits} saved_paths={saved_paths} "
+                        f"total_reactions={total_reactions} starts_seen={starts_seen}\n"
+                    )
+                    f.write("\t".join(self._STEP_FIELDS) + "\n")
+                    for row in path_rows:
+                        f.write(self._format_step_row(row))
+                    f.flush()
+                    os.fsync(f.fileno())
+            except OSError:
+                # Don't let snapshot IO failures kill the search.
+                pass
 
         def save_terminal(path_rows: list[SearchStep], initial_qed: float) -> None:
             nonlocal saved_paths, best_qed
@@ -495,10 +536,32 @@ class SearchRunner:
                 )
 
         def dfs(current: str, path_rows: list[SearchStep], initial_qed: float) -> None:
-            nonlocal total_reactions, best_qed
+            nonlocal total_reactions, best_qed, state_visits, last_heartbeat_t
             if self._reached_limit(saved_paths, total_reactions):
                 return
             step_idx = len(path_rows) - 1
+            state_visits += 1
+            # State-visit heartbeat. Fires *before* the expensive _all_next call so the
+            # log shows the frontier even when no `save_terminal` has fired in hours.
+            if (
+                self._stream_state_heartbeat_every > 0
+                and state_visits % self._stream_state_heartbeat_every == 0
+            ):
+                elapsed = time.monotonic() - run_start
+                rate = state_visits / elapsed if elapsed > 0 else 0.0
+                print(
+                    f"[exhausted/state] state_visits={state_visits} depth={step_idx} "
+                    f"saved_paths={saved_paths} total_reactions={total_reactions} "
+                    f"starts_seen={starts_seen} elapsed={elapsed:.0f}s "
+                    f"rate={rate:.1f} states/s current={current[:60]}",
+                    flush=True,
+                )
+                last_heartbeat_t = elapsed
+            if (
+                self._stream_inprogress_every > 0
+                and state_visits % self._stream_inprogress_every == 0
+            ):
+                write_inprogress(path_rows)
             if step_idx >= self.max_steps:
                 save_terminal(path_rows, initial_qed)
                 return

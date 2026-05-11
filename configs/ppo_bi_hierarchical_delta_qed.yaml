@@ -1,0 +1,76 @@
+project: GenMolRL_Bi
+experiment_name: PPO_Bi_Hierarchical
+reaction_mode: bi
+# r2_available is the default bi-mode masking (see configs/ppo_bi_masked_
+# delta_qed.yaml for rationale). Under this mask BiPPO uses the pattern-
+# match R2 set, skips apply_reaction at mask time, and lets the rare
+# sanitisation failures surface as invalid_reaction_penalty (-1) — the
+# policy learns from those failures. Set masking=reaction_valid for the
+# zero -1 contract (slow: per-(state, T) RDKit-validated R2 mask via
+# bi_r2_valid_mask), or masking=substructure for the cheapest mask.
+masking: r2_available
+reward: delta_qed
+max_episode_len: 5
+dataset:
+  training_file: data/Bi/reactants_train.pkl
+  test_file: data/Bi/reactants_test.pkl
+  templates_file: data/Bi/templates.pkl
+  start_strategy: random_pool
+env:
+  # ppo_bi is a hand-rolled hierarchical trainer that does not use the gym
+  # MoleculeDesignEnv. The fields below mirror the env settings that the
+  # trainer reads directly (use_stop_action, invalid_reaction_penalty, etc.)
+  # so behaviour can be compared against MaskablePPO Bi-PPO runs.
+  algorithm_family: ppo_bi_hierarchical
+  use_stop_action: true
+  stop_early_penalty: -0.05
+  stop_penalty_until_step: 3
+  invalid_reaction_penalty: -1.0
+  reward_round_digits: 3
+  info_qed_round_digits: 3
+training:
+  seed: 42
+  total_timesteps: 1000000
+  eval_freq: 10000
+  save_freq: 100000
+ppo_bi:
+  # Bi-PPO supports two policy architectures:
+  #   - 'hierarchical' (default): π(T, R2) = π_T(T) · π_R2(R2|T). The R2 head
+  #     is conditioned on the sampled template; the R2 mask is per-(state, T).
+  #   - 'multidiscrete':           π(T, R2) = π_T(T) · π_R2(R2). T and R2 are
+  #     sampled independently (matching SB3 MaskablePPO MultiDiscrete); the R2
+  #     mask is per-state (union over valid templates).
+  # Masking semantics follow the README contract:
+  #   - masking=reaction_valid guarantees zero invalid_reaction_penalty
+  #     rewards. Hierarchical uses the RDKit-validated per-(state, T) R2
+  #     mask (zero -1 by construction); multidiscrete adds joint rejection
+  #     sampling because independent (T, R2) can pair an R2 with a template
+  #     it doesn't actually work for.
+  #   - masking=substructure / r2_available are pattern-only and ALLOW some
+  #     invalid_reaction_penalty (-1) rewards when RDKit fails to sanitise
+  #     despite the pattern match. No rejection sampling in these modes —
+  #     the policy learns from the failure signal.
+  policy_arch: hierarchical
+  # r2_mask_kind is derived from `masking` automatically:
+  #   reaction_valid -> true_valid  (zero -1)
+  #   substructure / r2_available -> pattern  (-1 allowed)
+  # Override only for unusual experiments (e.g. masking=substructure +
+  # r2_mask_kind=true_valid to compare a pattern-only template mask against
+  # a true-valid R2 mask). Most users should leave this unset.
+  # r2_mask_kind: true_valid
+  learning_rate: 0.0003
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: 0.02
+  trunk_hidden: 256
+  template_embed_dim: 64
+  r2_embed_dim: 64
+  r2_resample_retries: 16
+  normalize_advantage: true

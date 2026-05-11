@@ -1,7 +1,14 @@
 project: GenMolRL_Bi
-experiment_name: PPO_Bi
+experiment_name: PPO_Bi_MultiDiscrete
 reaction_mode: bi
-masking: reaction_valid
+# r2_available is the default bi-mode masking: R1 first-reactant substructure
+# match plus, for bi templates, ≥1 R2 in the pool matching the second-reactant
+# pattern. It does NOT run apply_reaction at mask time, so it's much cheaper
+# than reaction_valid; the residual sanitisation failures surface as
+# invalid_reaction_penalty (-1) at env-step time, which the policy learns
+# from. Switch to reaction_valid for zero -1 by construction (slower) or to
+# substructure for the cheapest (R1-only) mask.
+masking: r2_available
 reward: delta_qed
 max_episode_len: 5
 dataset:
@@ -13,8 +20,9 @@ env:
   # Bi-reaction needs MultiDiscrete([T+1, R2]) so the policy can pick a
   # second reactant alongside the template. With the current Bi templates
   # this resolves to MultiDiscrete([103, 116415]) at runtime; the masking
-  # layer marks T as feasible-only (reaction_valid) and leaves R2 fully
-  # available to mirror genmolrl/envs/masking.py:multidiscrete_mask.
+  # layer marks T as feasible-only (r2_available: R1 match + ≥1 pattern-
+  # compatible R2 in the pool) and leaves R2 fully available to mirror
+  # genmolrl/envs/masking.py:multidiscrete_mask.
   algorithm_family: sb3_multidiscrete
   action_design: discrete
   use_stop_action: true
