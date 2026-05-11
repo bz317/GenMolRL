@@ -146,6 +146,11 @@ class SearchRunner:
         self._stream_inprogress_every: int = int(
             self.search_cfg.get("inprogress_snapshot_every", 100)
         )
+        # Bi exhaustive search can spend a long time scanning one template's R2
+        # pool before any DFS state/path heartbeat fires.
+        self._r2_scan_heartbeat_every: int = int(
+            self.search_cfg.get("r2_scan_heartbeat_every", 1000)
+        )
 
     def _optional_int(self, key: str, default: int | None) -> int | None:
         value = self.search_cfg.get(key, default)
@@ -156,7 +161,7 @@ class SearchRunner:
     def _template_name(self, idx: int) -> str:
         return str(self.manager.templates[idx].get("name", self.manager.templates[idx].get("Reaction", idx)))
 
-    def _candidate_products(self, current: str, template_idx: int) -> list[tuple[str, str | None, float]]:
+    def _iter_candidate_products(self, current: str, template_idx: int):
         template = self.manager.templates[template_idx]
         if template.get("type") == BI_TYPE:
             partners = self.manager.get_valid_reactants(template_idx)
@@ -165,16 +170,34 @@ class SearchRunner:
                 partners = partners[:1]
             elif self.max_r2_per_template is not None:
                 partners = partners[: self.max_r2_per_template]
-            out = []
-            for r2 in partners:
+            products_seen = 0
+            scan_start = time.monotonic()
+            for i, r2 in enumerate(partners, start=1):
                 product = self.manager.apply_reaction(current, template, r2)
                 if product:
-                    out.append((product, r2, self.reward_fn.step_reward(current, product)))
-            return out
+                    products_seen += 1
+                    yield product, r2, self.reward_fn.step_reward(current, product)
+                if (
+                    self.mode == "exhausted_search"
+                    and self._r2_scan_heartbeat_every > 0
+                    and i % self._r2_scan_heartbeat_every == 0
+                ):
+                    elapsed = time.monotonic() - scan_start
+                    rate = i / elapsed if elapsed > 0 else 0.0
+                    print(
+                        f"[exhausted/r2-scan] template={template_idx} "
+                        f"checked_r2={i}/{len(partners)} products={products_seen} "
+                        f"elapsed={elapsed:.0f}s rate={rate:.1f} r2/s "
+                        f"state={current[:60]}",
+                        flush=True,
+                    )
+            return
         product = self.manager.apply_reaction(current, template, None)
-        if not product:
-            return []
-        return [(product, None, self.reward_fn.step_reward(current, product))]
+        if product:
+            yield product, None, self.reward_fn.step_reward(current, product)
+
+    def _candidate_products(self, current: str, template_idx: int) -> list[tuple[str, str | None, float]]:
+        return list(self._iter_candidate_products(current, template_idx))
 
     def _valid_template_indices(self, current: str) -> list[int]:
         return self.manager.feasible_first_reactant_templates(current, kind=self.masking)
@@ -211,6 +234,11 @@ class SearchRunner:
             for product, r2, reward in self._candidate_products(current, idx):
                 candidates.append((idx, product, r2, reward))
         return candidates
+
+    def _iter_all_next(self, current: str):
+        for idx in self._valid_template_indices(current):
+            for product, r2, reward in self._iter_candidate_products(current, idx):
+                yield idx, product, r2, reward
 
     # Field order shared across in-memory and streaming writers
     _STEP_FIELDS = (
@@ -565,13 +593,11 @@ class SearchRunner:
             if step_idx >= self.max_steps:
                 save_terminal(path_rows, initial_qed)
                 return
-            next_actions = self._all_next(current)
-            if not next_actions:
-                save_terminal(path_rows, initial_qed)
-                return
-            for template_idx, product, r2, reward in next_actions:
+            expanded_any = False
+            for template_idx, product, r2, reward in self._iter_all_next(current):
                 if self._reached_limit(saved_paths, total_reactions):
                     return
+                expanded_any = True
                 q = qed(product)
                 best_qed = max(best_qed, q)
                 total_reactions += 1
@@ -592,12 +618,22 @@ class SearchRunner:
                     ],
                     initial_qed,
                 )
+            if not expanded_any:
+                save_terminal(path_rows, initial_qed)
 
         try:
             with self._stream_paths.open("w", encoding="utf-8") as f_steps, \
                     self._stream_trajs.open("w", encoding="utf-8") as f_traj:
                 handles["steps"] = f_steps
                 handles["traj"] = f_traj
+                print(
+                    f"[exhausted/init] starts={len(self.reactant_keys)} max_starts={self.max_starts} "
+                    f"max_steps={self.max_steps} max_paths={self.max_paths} "
+                    f"max_reactions={self.max_reactions} max_r2_per_template={self.max_r2_per_template} "
+                    f"results={self.result_file} sidecars={self._stream_paths}, {self._stream_trajs} "
+                    f"inprogress={inprogress_file}",
+                    flush=True,
+                )
                 for start in self.reactant_keys:
                     if self._reached_limit(saved_paths, total_reactions):
                         break
@@ -608,20 +644,25 @@ class SearchRunner:
                     starts_seen += 1
                     initial_qed = qed(start)
                     paths_before = saved_paths
+                    start_row = SearchStep(
+                        path_id=-1,
+                        step=0,
+                        reactant=start,
+                        template="START",
+                        product=start,
+                        qed=round(initial_qed, 3),
+                        reward=0.0,
+                        second_reactant=None,
+                    )
+                    write_inprogress([start_row])
+                    print(
+                        f"[exhausted/start-begin] start={starts_seen} "
+                        f"initial_qed={round(initial_qed, 3)} smiles={start[:80]}",
+                        flush=True,
+                    )
                     dfs(
                         start,
-                        [
-                            SearchStep(
-                                path_id=-1,
-                                step=0,
-                                reactant=start,
-                                template="START",
-                                product=start,
-                                qed=round(initial_qed, 3),
-                                reward=0.0,
-                                second_reactant=None,
-                            )
-                        ],
+                        [start_row],
                         initial_qed,
                     )
                     paths_for_start = saved_paths - paths_before

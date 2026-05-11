@@ -49,3 +49,7 @@ search:
   results_file: runs/exhausted_search_bi_results.txt
   overwrite_results: true
   use_wandb: true
+  progress_every_starts: 1
+  state_heartbeat_every: 100
+  inprogress_snapshot_every: 100
+  r2_scan_heartbeat_every: 1000
