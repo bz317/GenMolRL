@@ -1,0 +1,95 @@
+#!/bin/bash
+#!
+#! SLURM job script for GenMolRL Bi-PPO MultiDiscrete
+#! (run_genmolrl_ppo_bi_multidiscrete.sh, SB3 MaskablePPO,
+#! MultiDiscrete([T+1, R2]) action space). Pair:
+#! run_launcher/HPC_scripts/bi/slurm_genmolrl_gpu_ppo_hierarchical.
+#! Mirrors run_launcher/HPC_scripts/uni/slurm_genmolrl_gpu_ppo, swapped to the bi-reaction
+#! launcher + config. Action space is MultiDiscrete([103, 116415]) so the
+#! policy network is heavier than uni; ampere GPU partition is recommended.
+#!
+
+#!#############################################################
+#!#### Modify the options in this section as appropriate ######
+#!#############################################################
+
+#! sbatch directives begin here ###############################
+#! Name of the job:
+#SBATCH -J genmolrl_ppo_bi_md
+#! Which project should be charged (NB Wilkes2 projects end in '-GPU'):
+#SBATCH -A MLMI-BZ317-SL2-GPU
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:1
+#SBATCH --time=36:00:00
+#SBATCH --mail-user=bz317@cam.ac.uk
+#SBATCH --mail-type=ALL
+
+#SBATCH -p ampere
+
+##SBATCH -o logs/ppo_bi_md_%j.out
+##SBATCH -e logs/ppo_bi_md_%j.err
+
+#! sbatch directives end here #################################
+
+#! Optional overrides: CONDA_ENV, REACTION_MODE, MASKING, REWARD, CONFIG, EXPERIMENT_NAME
+#! Submit: cd /home/bz317/rds/hpc-work/GenMolRL/GenMolRL && sbatch run_launcher/HPC_scripts/bi/slurm_genmolrl_gpu_ppo_multidiscrete
+
+numnodes=$SLURM_JOB_NUM_NODES
+numtasks=$SLURM_NTASKS
+mpi_tasks_per_node=$(echo "$SLURM_TASKS_PER_NODE" | sed -e  's/^\([0-9][0-9]*\).*$/\1/')
+
+. /etc/profile.d/modules.sh
+module purge
+module load rhel8/default-amp
+
+CONDA_ROOT="${CONDA_ROOT:-/home/bz317/rds/hpc-work/miniconda3}"
+source "${CONDA_ROOT}/etc/profile.d/conda.sh"
+CONDA_ENV="${CONDA_ENV:-RL_for_new_mol}"
+conda activate "${CONDA_ENV}"
+
+#! Resolve repo root: SLURM_SUBMIT_DIR is wherever the user ran sbatch from.
+#! Three lookup tiers cover (a) submitted from repo root, (b) submitted from
+#! HPC_scripts/, and (c) submitted from run_launcher/HPC_scripts/bi/ directly.
+#! Resolve the project root (the directory holding `genmolrl/`, `configs/`,
+#! `data/`, `runs/`, `run_launcher/`, ...). The fallback chain handles the
+#! cases where sbatch is invoked from the project root, from
+#! `${PROJECT_ROOT}/run_launcher`, or from the directory holding this
+#! file itself. The last fallback is the hardcoded absolute path.
+LAUNCHER_REL="run_launcher/sh_files/run_genmolrl_ppo_bi_multidiscrete.sh"
+for _cand in "${SLURM_SUBMIT_DIR}" "${SLURM_SUBMIT_DIR}/.." "${SLURM_SUBMIT_DIR}/../.." "${SLURM_SUBMIT_DIR}/../../.." "/home/bz317/rds/hpc-work/GenMolRL/GenMolRL"; do
+  if [ -f "${_cand}/${LAUNCHER_REL}" ]; then
+    PROJECT_ROOT="$(cd "${_cand}" && pwd)"
+    break
+  fi
+done
+unset _cand
+LAUNCHER_PATH="${PROJECT_ROOT}/${LAUNCHER_REL}"
+
+export OMP_NUM_THREADS=1
+export PYTHONUNBUFFERED=1
+
+cd "${PROJECT_ROOT}"
+mkdir -p logs
+JOBID=$SLURM_JOB_ID
+
+# The YAML config in $LAUNCHER_PATH owns `experiment_name`. We only export
+# `WANDB_RUN_POST_APPEND` so `run_experiment.py` tags the run name with a
+# `_HPC` suffix (or whatever the user provided). The launcher itself never
+# hardcodes EXPERIMENT_NAME, so the YAML stays the source of truth.
+export WANDB_RUN_POST_APPEND="${WANDB_RUN_POST_APPEND:-HPC}"
+
+CMD="bash \"${LAUNCHER_PATH}\""
+CMD="$CMD 2>&1 | tee logs/ppo_bi_md_${JOBID}.log"
+
+echo -e "JobID: $JOBID\n======"
+echo "Time: $(date)"
+echo "Running on: $(hostname)"
+echo "PROJECT_ROOT: ${PROJECT_ROOT}"
+echo "CONDA_ROOT: ${CONDA_ROOT}"
+echo "CONDA_ENV: ${CONDA_ENV}"
+echo "WANDB_RUN_POST_APPEND: ${WANDB_RUN_POST_APPEND}"
+echo -e "\nnumtasks=$numtasks, numnodes=$numnodes (OMP_NUM_THREADS=$OMP_NUM_THREADS)"
+echo -e "\nExecuting:\n==================\n$CMD\n"
+
+eval $CMD

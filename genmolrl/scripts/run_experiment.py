@@ -97,6 +97,13 @@ def main() -> None:
         "experiment_name",
         f"{args.algorithm.upper()}_{config['reaction_mode']}_{config['reward']}",
     )
+    # Optional run-name suffix (e.g. `_HPC` from SLURM wrappers). Lets the
+    # YAML stay the source of truth for `experiment_name` while still
+    # letting the SLURM layer tag the run. Idempotent: if the resolved
+    # name already ends with `_<suffix>`, do not append again.
+    suffix = os.environ.get("WANDB_RUN_POST_APPEND", "").strip()
+    if suffix and not experiment_name.endswith(f"_{suffix}"):
+        experiment_name = f"{experiment_name}_{suffix}"
     os.environ.setdefault("WANDB_PROJECT", config.get("project", "GenMolRL"))
     _trainer(args.algorithm)(config, experiment_name)
 

@@ -24,7 +24,7 @@ environment / masking / staging stack:
 ## Layout
 
 ```text
-GenMolRL/
+GenMolRL/                       # <project-root> — `project_root()` resolves here
   genmolrl/
     chem/          # RDKit reactions, fingerprints, product selection, dataset staging
     envs/          # unified molecule-design Gymnasium env, masks, rewards, starts
@@ -33,9 +33,23 @@ GenMolRL/
     logging/       # W&B metrics and callbacks
     methods/       # lazy method adapters
     scripts/       # unified CLI entry points
-  configs/         # experiment YAML configs
+  configs/         # experiment YAML configs (paths inside are project-relative)
+  data/            # staged Uni/ and Bi/ datasets + templates
+  runs/            # W&B run directories, monitors, checkpoints, search results
   tests/           # smoke tests
+  tools/           # one-off audits, smoke checks, plot scripts
+  run_launcher/
+    sh_files/      # `run_genmolrl_*.sh` wrappers (set PROJECT_ROOT, cd, run python)
+    HPC_scripts/
+      uni/         # SLURM job scripts for uni-reaction launchers
+      bi/          # SLURM job scripts for bi-reaction launchers
 ```
+
+All wrapper scripts under `run_launcher/sh_files/` and SLURM scripts under
+`run_launcher/HPC_scripts/{uni,bi}/` anchor themselves to the project root
+above (via `$(dirname "$0")/../..` / a `SLURM_SUBMIT_DIR` fallback chain),
+so they are safe to invoke from any cwd. All paths inside these scripts
+and inside `configs/*.yaml` are relative to the project root.
 
 ## Installation
 
@@ -69,21 +83,21 @@ GraphTransRL additionally needs `torch_geometric` compatible with the installed 
 python -m pip install torch-geometric -f https://data.pyg.org/whl/torch-2.3.0+cu121.html
 ```
 
-GenMolRL is not installed as a site package by default. Run commands with `PYTHONPATH=GenMolRL` from the repository root:
+GenMolRL is not installed as a site package by default. Run the wrapper scripts from the project root — they set `PYTHONPATH` and `cd` to the project root automatically:
 
 ```bash
-cd <repo-root>
-./run_genmolrl_ppo.sh
+cd <project-root>
+./run_launcher/sh_files/run_genmolrl_ppo.sh
 ```
 
 Optional editable install:
 
 ```bash
-cd <repo-root>/GenMolRL
+cd <project-root>
 python -m pip install -e .
 ```
 
-After an editable install, `PYTHONPATH=GenMolRL` is usually no longer necessary, but the wrapper scripts still set it explicitly for portability.
+After an editable install, the explicit `PYTHONPATH=.` is usually no longer necessary, but the wrapper scripts still set it explicitly for portability.
 
 For W&B logging, either log in normally:
 
@@ -91,24 +105,30 @@ For W&B logging, either log in normally:
 wandb login
 ```
 
-or place the API key in the existing repository-level file:
+or drop the API key in a plain-text file **outside** the project (so it never
+ends up in the git history or in a pushed artifact). The wrapper scripts look
+for it at `<repo-root>/wandb_api_key.txt` — i.e. the parent of `<project-root>`:
 
 ```text
-wandb_api_key.txt
+<repo-root>/wandb_api_key.txt          # NOT inside <project-root> = <repo-root>/GenMolRL/
 ```
 
-The wrapper scripts read this file automatically. To disable cloud logging for smoke tests:
+`wandb_api_key.txt` is also listed in `.gitignore`, but the canonical location
+is one directory above the project so an accidental `git add .` cannot stage
+it. Override the path per-invocation by exporting `WANDB_API_KEY_FILE=/path/...`,
+or skip the file entirely by exporting `WANDB_API_KEY` directly. To disable
+cloud logging for smoke tests:
 
 ```bash
-WANDB_MODE=disabled ./run_genmolrl_ppo.sh
+WANDB_MODE=disabled ./run_launcher/sh_files/run_genmolrl_ppo.sh
 ```
 
 Quick installation check:
 
 ```bash
-cd <repo-root>
+cd <project-root>          # i.e. <repo-root>/GenMolRL
 conda activate RL_for_new_mol
-PYTHONPATH=GenMolRL python -m compileall -q GenMolRL/genmolrl
+PYTHONPATH=. python -m compileall -q genmolrl
 ```
 
 ## Data
@@ -121,16 +141,16 @@ data/Uni/reactants_test.pkl
 data/Uni/templates_unimolecolar_explicit.pkl
 ```
 
-Check the staged files with:
+Check the staged files with (run from the project root, `<repo>/GenMolRL`):
 
 ```bash
-PYTHONPATH=GenMolRL python -m genmolrl.scripts.stage_data
+PYTHONPATH=. python -m genmolrl.scripts.stage_data
 ```
 
 The command above only validates and reports the existing `data/Uni` layout. It does not depend on the old source tree. If you intentionally want to regenerate the staged files from an external split, pass that source explicitly:
 
 ```bash
-PYTHONPATH=GenMolRL python -m genmolrl.scripts.stage_data --source-dir <external-uni-split-dir>
+PYTHONPATH=. python -m genmolrl.scripts.stage_data --source-dir <external-uni-split-dir>
 ```
 
 The canonical Uni directory, relative to the `GenMolRL/` project root, is:
@@ -160,48 +180,67 @@ That directory is intentionally empty for now. The spelling `unimolecolar` is pr
 
 ## Running Experiments
 
-Use the wrapper scripts from the repository root:
+Use the wrapper scripts from the project root (`<repo>/GenMolRL`):
 
 ```bash
-./run_genmolrl_ppo.sh                # uni PPO (MaskablePPO Discrete)
-./run_genmolrl_a2c.sh                # uni A2C
-./run_genmolrl_td3_continuous.sh     # uni TD3, PGFS continuous R2 head
-./run_genmolrl_td3_discrete.sh       # uni TD3, template-only critic
-./run_genmolrl_td3.sh                # alias → continuous (backward compatible)
-./run_genmolrl_graphtransrl.sh             # uni GraphTransRL (trajectory balance)
-./run_genmolrl_graphtransppo.sh            # uni GraphTransPPO (PPO over the graph backbone)
-./run_genmolrl_ppo_bi_multidiscrete.sh     # bi PPO, SB3 MaskablePPO + MultiDiscrete([T+1, R2])
-./run_genmolrl_ppo_bi_hierarchical.sh      # bi PPO, hand-rolled trainer with π(T)·π(R2|s,T)
-./run_genmolrl_random_search.sh
-./run_genmolrl_greedy_search.sh
-./run_genmolrl_exhausted.sh          # uni exhaustive enumeration
-./run_genmolrl_exhausted_bi.sh       # bi exhaustive enumeration (per-path streaming)
+./run_launcher/sh_files/run_genmolrl_ppo.sh                # uni PPO (MaskablePPO Discrete)
+./run_launcher/sh_files/run_genmolrl_a2c.sh                # uni A2C
+./run_launcher/sh_files/run_genmolrl_td3_continuous.sh     # uni TD3, PGFS continuous R2 head
+./run_launcher/sh_files/run_genmolrl_td3_discrete.sh       # uni TD3, template-only critic
+./run_launcher/sh_files/run_genmolrl_graphtransrl.sh             # uni GraphTransRL (trajectory balance)
+./run_launcher/sh_files/run_genmolrl_graphtransppo.sh            # uni GraphTransPPO (PPO over the graph backbone)
+./run_launcher/sh_files/run_genmolrl_ppo_bi_multidiscrete.sh     # bi PPO, SB3 MaskablePPO + MultiDiscrete([T+1, R2])
+./run_launcher/sh_files/run_genmolrl_ppo_bi_hierarchical.sh      # bi PPO, hand-rolled trainer with π(T)·π(R2|s,T)
+./run_launcher/sh_files/run_genmolrl_random_search.sh
+./run_launcher/sh_files/run_genmolrl_greedy_search.sh
+./run_launcher/sh_files/run_genmolrl_exhausted.sh          # uni exhaustive enumeration
+./run_launcher/sh_files/run_genmolrl_exhausted_bi.sh       # bi exhaustive enumeration (per-path streaming)
 ```
 
-Or call the unified launcher directly:
+Or call the unified launcher directly (the YAML config alone fully
+specifies the run; CLI flags are only needed for one-off overrides):
 
 ```bash
-PYTHONPATH=GenMolRL python -m genmolrl.scripts.run_experiment \
+PYTHONPATH=. python -m genmolrl.scripts.run_experiment \
   --algorithm ppo \
-  --reaction-mode uni \
-  --masking reaction_valid \
-  --reward delta_qed \
   --config configs/ppo_uni_masked_delta_qed.yaml
 ```
 
-Common environment overrides:
+### YAML is the single source of truth
+
+To change `reaction_mode`, `masking`, `reward`, `experiment_name`,
+`max_episode_len`, the dataset paths, or any model hyperparameter for a run,
+**edit the YAML config**. The launcher scripts under `run_launcher/sh_files/`
+no longer pass `${VAR:-default}` defaults to `run_experiment.py`; they only
+forward `--algorithm` and `--config`, plus any of these optional flags **when
+the matching env var is explicitly set**:
+
+| Env var            | Forwarded as           | Purpose (when set)                                          |
+| ------------------ | ---------------------- | ----------------------------------------------------------- |
+| `REACTION_MODE`    | `--reaction-mode`      | Override `reaction_mode` for this invocation only.          |
+| `MASKING`          | `--masking`            | Override `masking` for this invocation only.                |
+| `REWARD`           | `--reward`             | Override `reward` for this invocation only.                 |
+| `EXPERIMENT_NAME`  | `--experiment-name`    | Override the W&B run name (otherwise comes from YAML).      |
+| `MAX_EPISODE_LEN`  | `--max-episode-len`    | Override `max_episode_len` for this invocation only.        |
+| `TRAINING_FILE`    | `--training-file`      | Override `dataset.training_file`.                           |
+| `TEST_FILE`        | `--test-file`          | Override `dataset.test_file`.                               |
+| `TEMPLATES_FILE`   | `--templates-file`     | Override `dataset.templates_file`.                          |
+| `GREEDY_MODE`      | `--greedy-mode`        | Override `search.greedy_mode` for greedy_search only.       |
+| `CONFIG`           | `--config`             | Use a non-default YAML file.                                |
+| `WANDB_RUN_POST_APPEND` | (handled in Python)  | Append a suffix to the resolved run name (e.g. `_HPC` from SLURM). |
+
+If none of these are set, the YAML config is the only thing controlling the
+run. This means: **changing a YAML value is enough** — you do not need to edit
+the launcher script or the SLURM script. Common ad-hoc overrides:
 
 ```bash
-EXPERIMENT_NAME=PPO_Uni_test ./run_genmolrl_ppo.sh
-MASKING=none ./run_genmolrl_ppo.sh
-REWARD=final_qed ./run_genmolrl_a2c.sh
-REACTION_MODE=bi ./run_genmolrl_td3_continuous.sh    # optional; overrides YAML only when set
-WANDB_PROJECT=MyTeam EXPERIMENT_NAME=my_td3_run ./run_genmolrl_td3_continuous.sh
-CONFIG=configs/td3_uni_masked_balance_delta_qed.yaml ./run_genmolrl_td3_continuous.sh   # override YAML path only when needed
-MAX_EPISODE_LEN=3 ./run_genmolrl_ppo.sh
-WANDB_MODE=disabled ./run_genmolrl_random_search.sh
-WANDB_MODE=disabled ./run_genmolrl_ppo.sh
-WANDB_MODE=disabled ./run_genmolrl_graphtransrl.sh
+MASKING=none ./run_launcher/sh_files/run_genmolrl_ppo.sh
+REWARD=final_qed ./run_launcher/sh_files/run_genmolrl_a2c.sh
+REACTION_MODE=bi ./run_launcher/sh_files/run_genmolrl_td3_continuous.sh
+EXPERIMENT_NAME=my_test ./run_launcher/sh_files/run_genmolrl_ppo.sh
+CONFIG=configs/td3_uni_masked_balance_delta_qed.yaml ./run_launcher/sh_files/run_genmolrl_td3_continuous.sh
+MAX_EPISODE_LEN=3 ./run_launcher/sh_files/run_genmolrl_ppo.sh
+WANDB_MODE=disabled ./run_launcher/sh_files/run_genmolrl_random_search.sh
 ```
 
 Search runners also accept dataset path overrides:
@@ -209,7 +248,7 @@ Search runners also accept dataset path overrides:
 ```bash
 TEST_FILE=data/Uni/reactants_test.pkl \
 TEMPLATE_FILE=data/Uni/templates_unimolecolar_explicit.pkl \
-./run_genmolrl_random_search.sh
+./run_launcher/sh_files/run_genmolrl_random_search.sh
 ```
 
 `TEMPLATES_FILE` is also accepted. Search baselines are test-only, so they use `TEST_FILE` and do not require a train data path. The GraphTransRL wrapper accepts `TRAINING_FILE`, `TEST_FILE`, and `TEMPLATES_FILE`. The wrapper scripts use the files already under `data/Uni` by default. Set `STAGE_DATA=true` to validate the staged files before launch, or set both `STAGE_DATA=true` and `STAGE_SOURCE_DIR=<external-uni-split-dir>` when you intentionally want to regenerate the staged files from an external source directory.
@@ -401,7 +440,7 @@ The policy backbone is a graph transformer with PyG `GENConv` and `TransformerCo
 Run it with:
 
 ```bash
-./run_genmolrl_graphtransrl.sh
+./run_launcher/sh_files/run_genmolrl_graphtransrl.sh
 ```
 
 ### GraphTransPPO
@@ -420,7 +459,7 @@ than the learning rule.
 Run it with:
 
 ```bash
-./run_genmolrl_graphtransppo.sh
+./run_launcher/sh_files/run_genmolrl_graphtransppo.sh
 ```
 
 Currently uni-only. Bi support would require extending the graph readout to
@@ -472,16 +511,16 @@ policy to learn from.
 Run them with:
 
 ```bash
-./run_genmolrl_ppo_bi_multidiscrete.sh                          # SB3 MaskablePPO MultiDiscrete, r2_available
-./run_genmolrl_ppo_bi_hierarchical.sh                           # hand-rolled BiPPO Hierarchical, r2_available
-MASKING=reaction_valid ./run_genmolrl_ppo_bi_hierarchical.sh    # zero -1 contract
+./run_launcher/sh_files/run_genmolrl_ppo_bi_multidiscrete.sh                          # SB3 MaskablePPO MultiDiscrete, r2_available
+./run_launcher/sh_files/run_genmolrl_ppo_bi_hierarchical.sh                           # hand-rolled BiPPO Hierarchical, r2_available
+MASKING=reaction_valid ./run_launcher/sh_files/run_genmolrl_ppo_bi_hierarchical.sh    # zero -1 contract
 ```
 
-Corresponding SLURM scripts live in `HPC_scripts/bi/`:
+Corresponding SLURM scripts live in `run_launcher/HPC_scripts/bi/`:
 
 ```bash
-sbatch HPC_scripts/bi/slurm_genmolrl_gpu_ppo_multidiscrete
-sbatch HPC_scripts/bi/slurm_genmolrl_gpu_ppo_hierarchical
+sbatch run_launcher/HPC_scripts/bi/slurm_genmolrl_gpu_ppo_multidiscrete
+sbatch run_launcher/HPC_scripts/bi/slurm_genmolrl_gpu_ppo_hierarchical
 ```
 
 ### Random Search
@@ -521,7 +560,7 @@ search:
 Use the wrapper override:
 
 ```bash
-GREEDY_MODE=positive_delta_only ./run_genmolrl_greedy_search.sh
+GREEDY_MODE=positive_delta_only ./run_launcher/sh_files/run_genmolrl_greedy_search.sh
 ```
 
 `best_action` may take a negative delta-QED action if every valid action is negative, choosing the least bad one. `positive_delta_only` stops instead, keeping the current molecule as the final molecule.
@@ -542,8 +581,8 @@ during long bi runs and the process can be safely interrupted without
 losing completed paths. Run them with:
 
 ```bash
-./run_genmolrl_exhausted.sh       # uni
-./run_genmolrl_exhausted_bi.sh    # bi
+./run_launcher/sh_files/run_genmolrl_exhausted.sh       # uni
+./run_launcher/sh_files/run_genmolrl_exhausted_bi.sh    # bi
 ```
 
 Search stopping controls:
@@ -680,7 +719,7 @@ Masking (`none`, `substructure`, `reaction_valid`, `r2_available`) is unchanged 
 
 Example configs: `configs/td3_uni_continuous_masked_delta_qed.yaml` (continuous) vs `configs/td3_uni_discrete_masked_delta_qed.yaml` (discrete).
 
-Use **`run_genmolrl_td3_continuous.sh`** or **`run_genmolrl_td3_discrete.sh`** for experiment setup: both export **`WANDB_PROJECT`** (default `GenMolRL`) and pass **`EXPERIMENT_NAME`** (defaults `TD3_Uni_Continuous` vs `TD3_Uni_Discrete`). **`run_genmolrl_td3.sh`** is a backward-compatible alias for the continuous runner. Hyperparameters—including **`env.action_design`**, **`masking`**, **`reward`**, and **`td3.*`**—come from each runner’s default YAML (override with **`CONFIG=...`**). Export **`REACTION_MODE`**, **`MASKING`**, or **`REWARD`** only when you intentionally override the config file.
+Use **`run_genmolrl_td3_continuous.sh`** or **`run_genmolrl_td3_discrete.sh`** for experiment setup. Both delegate to **`run_genmolrl_td3_common.sh`**, which sources the shared launcher prelude and invokes the unified `run_experiment` CLI. All hyperparameters — `project`, `experiment_name`, `env.action_design`, `masking`, `reward`, and the `td3.*` block — come from each runner's default YAML (`configs/td3_uni_continuous_masked_delta_qed.yaml` and `configs/td3_uni_discrete_masked_delta_qed.yaml`). Override the YAML path via `CONFIG=...`, or override a single field via `MASKING=...`, `REWARD=...`, `REACTION_MODE=...`, `EXPERIMENT_NAME=...`. The launchers themselves never inject defaults.
 
 ## Masking Modes
 
@@ -837,7 +876,7 @@ keep R2/KNN handling separate.
 
 Bi-PPO defaults to `r2_available` for wallclock-cheap training; flip to
 `reaction_valid` (e.g.
-`MASKING=reaction_valid ./run_genmolrl_ppo_bi_hierarchical.sh`)
+`MASKING=reaction_valid ./run_launcher/sh_files/run_genmolrl_ppo_bi_hierarchical.sh`)
 when zero `invalid_reaction_penalty` rewards in recorded transitions is
 a requirement. The same override on the multidiscrete launcher uses the
 fixed bi-aware template mask but does not enforce joint `(T, R2)`
@@ -985,12 +1024,12 @@ during a run and safe to interrupt without losing completed paths).
 
 ## Smoke Checks
 
-After staging data:
+After staging data, run from the project root (`<repo>/GenMolRL`):
 
 ```bash
-PYTHONPATH=GenMolRL python -m compileall -q GenMolRL/genmolrl
-PYTHONPATH=".:GenMolRL" python - <<'PY'
-from GenMolRL.tests.test_env_smoke import test_ppo_uni_env_reset, test_td3_uni_env_reset
+PYTHONPATH=. python -m compileall -q genmolrl
+PYTHONPATH=. python - <<'PY'
+from tests.test_env_smoke import test_ppo_uni_env_reset, test_td3_uni_env_reset
 test_ppo_uni_env_reset()
 test_td3_uni_env_reset()
 print("smoke ok")

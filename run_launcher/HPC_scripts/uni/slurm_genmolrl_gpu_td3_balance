@@ -1,0 +1,119 @@
+#!/bin/bash
+#!
+#! SLURM job script for GenMolRL balanced TD3 (run_genmolrl_td3_balance.sh) on GPU
+#! Template aligned with new_mol_with_RL_GNN/hpc_scripts/slurm_new_mol_gpu_td3
+#!
+
+#!#############################################################
+#!#### Modify the options in this section as appropriate ######
+#!#############################################################
+
+#! sbatch directives begin here ###############################
+#! Name of the job:
+#SBATCH -J genmolrl_td3_bal
+#! Which project should be charged (NB Wilkes2 projects end in '-GPU'):
+#SBATCH -A OZTIRELI-SL2-GPU
+#! How many whole nodes should be allocated?
+#SBATCH --nodes=1
+#! How many (MPI) tasks will there be in total?
+#SBATCH --ntasks=1
+#! Specify the number of GPUs per node:
+#SBATCH --gres=gpu:1
+#! How much wallclock time will be required?
+#SBATCH --time=24:00:00
+#! What types of email messages do you wish to receive?
+#SBATCH --mail-user=bz317@cam.ac.uk
+#SBATCH --mail-type=ALL
+
+#! Do not change:
+#SBATCH -p ampere
+
+#! Output (optional - uncomment to redirect stdout/stderr):
+##SBATCH -o logs/td3_balance_%j.out
+##SBATCH -e logs/td3_balance_%j.err
+
+#! sbatch directives end here #################################
+
+#! ######################################################################################
+#! Optional overrides (export before sbatch or use --export=...)
+#!   CONDA_ENV=RL_for_new_mol (default in run_genmolrl_td3_balance.sh)
+#!   REACTION_MODE, MASKING, REWARD, CONFIG, EXPERIMENT_NAME
+#!   WANDB_MODE=offline, WANDB_INIT_TIMEOUT=600
+#! ######################################################################################
+
+#! Submit from repo root (recommended):
+#!   cd /home/bz317/rds/hpc-work/GenMolRL/GenMolRL && sbatch run_launcher/HPC_scripts/uni/slurm_genmolrl_gpu_td3_balance
+#! Or from this directory:
+#!   cd .../GenMolRL/run_launcher/HPC_scripts/uni && sbatch slurm_genmolrl_gpu_td3_balance
+
+#! Number of nodes and tasks per node allocated by SLURM (do not change):
+numnodes=$SLURM_JOB_NUM_NODES
+numtasks=$SLURM_NTASKS
+mpi_tasks_per_node=$(echo "$SLURM_TASKS_PER_NODE" | sed -e  's/^\([0-9][0-9]*\).*$/\1/')
+
+#! Environment setup (Ampere stack)
+. /etc/profile.d/modules.sh
+module purge
+module load rhel8/default-amp
+
+#! Conda: use RDS Miniconda — matches RL_for_new_mol install location
+CONDA_ROOT="${CONDA_ROOT:-/home/bz317/rds/hpc-work/miniconda3}"
+source "${CONDA_ROOT}/etc/profile.d/conda.sh"
+CONDA_ENV="${CONDA_ENV:-RL_for_new_mol}"
+conda activate "${CONDA_ENV}"
+
+#! Resolve repo root: sbatch cwd is SLURM_SUBMIT_DIR
+#! Resolve the project root (the directory holding `genmolrl/`, `configs/`,
+#! `data/`, `runs/`, `run_launcher/`, ...). The fallback chain handles the
+#! cases where sbatch is invoked from the project root, from
+#! `${PROJECT_ROOT}/run_launcher`, or from the directory holding this
+#! file itself. The last fallback is the hardcoded absolute path.
+# td3_balance shares the same launcher as TD3 continuous; it differs only
+# in the YAML config (`configs/td3_uni_masked_balance_delta_qed.yaml`),
+# which we pin via CONFIG=... below.
+LAUNCHER_REL="run_launcher/sh_files/run_genmolrl_td3_continuous.sh"
+export CONFIG="${CONFIG:-configs/td3_uni_masked_balance_delta_qed.yaml}"
+for _cand in "${SLURM_SUBMIT_DIR}" "${SLURM_SUBMIT_DIR}/.." "${SLURM_SUBMIT_DIR}/../.." "${SLURM_SUBMIT_DIR}/../../.." "/home/bz317/rds/hpc-work/GenMolRL/GenMolRL"; do
+  if [ -f "${_cand}/${LAUNCHER_REL}" ]; then
+    PROJECT_ROOT="$(cd "${_cand}" && pwd)"
+    break
+  fi
+done
+unset _cand
+LAUNCHER_PATH="${PROJECT_ROOT}/${LAUNCHER_REL}"
+
+export OMP_NUM_THREADS=1
+export PYTHONUNBUFFERED=1
+
+###############################################################
+### You should not have to change anything below this line ####
+###############################################################
+
+cd "${PROJECT_ROOT}"
+mkdir -p logs runs
+JOBID=$SLURM_JOB_ID
+
+export WANDB_DIR="${WANDB_DIR:-${PROJECT_ROOT}/runs/wandb}"
+mkdir -p "${WANDB_DIR}"
+
+# The YAML config in $LAUNCHER_PATH owns `experiment_name`. We only export
+# `WANDB_RUN_POST_APPEND` so `run_experiment.py` tags the run name with a
+# `_HPC` suffix (or whatever the user provided). The launcher itself never
+# hardcodes EXPERIMENT_NAME, so the YAML stays the source of truth.
+export WANDB_RUN_POST_APPEND="${WANDB_RUN_POST_APPEND:-HPC}"
+
+CMD="bash \"${LAUNCHER_PATH}\""
+CMD="$CMD 2>&1 | tee logs/td3_balance_${JOBID}.log"
+
+echo -e "JobID: $JOBID\n======"
+echo "Time: $(date)"
+echo "Running on: $(hostname)"
+echo "PROJECT_ROOT: ${PROJECT_ROOT}"
+echo "CONDA_ROOT: ${CONDA_ROOT}"
+echo "CONDA_ENV: ${CONDA_ENV}"
+echo "WANDB_RUN_POST_APPEND: ${WANDB_RUN_POST_APPEND}"
+echo "WANDB_DIR: ${WANDB_DIR}"
+echo -e "\nnumtasks=$numtasks, numnodes=$numnodes (OMP_NUM_THREADS=$OMP_NUM_THREADS)"
+echo -e "\nExecuting:\n==================\n$CMD\n"
+
+eval $CMD

@@ -1,2 +1,12 @@
 runs/
 slurm-[0-9]*.out
+wandb/
+logs/
+# Secrets / credentials must NEVER live inside the project, but we still
+# block the canonical filename here so an accidental copy is caught by git.
+wandb_api_key.txt
+*.netrc
+*.token
+.env
+.env.*
+!.env.example
