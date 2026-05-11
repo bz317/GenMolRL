@@ -160,21 +160,38 @@ class ReactionManager:
     def template_reaction_valid_mask(self, reactant: str | None) -> torch.Tensor:
         """Validate by R1 match plus successful RDKit product generation.
 
-        This is the exact legacy experiments-branch PPO/A2C mask for Uni runs:
-        a template is valid iff the current molecule matches as first reactant and
-        `apply_reaction(reactant, template, None)` returns a sanitized product.
-        For true bimolecular templates this returns 0 unless a fixed reagent is encoded
-        in the template, because no learned/selected R2 is supplied at mask time.
+        Uni-type templates (``unimolecular`` and ``unimolecular_explicit_reagent``)
+        are validated with ``apply_reaction(state, t, None)`` — R2 is never used.
+        This preserves the exact legacy uni behaviour: in ``reaction_mode: uni``
+        the manager only holds uni-type templates, so the bi branch below is
+        unreachable and the mask is bit-identical to the pre-fix implementation.
+
+        Bi-type templates (``bimolecular``) require finding an R2: a template is
+        valid iff R1 matches AND there is some ``r2`` in ``self.reactants`` such
+        that ``apply_reaction(state, t, r2)`` returns a sanitised product. The
+        loop also tries an initial ``None``-R2 call first so bi templates that
+        bake fixed reagents into ``_explicit_reagents`` are handled by the same
+        code path without paying the R2-pool scan.
         """
         key = (reactant, "reaction_valid")
         if key not in self.template_mask_cache:
-            values = []
-            for template in self.templates.values():
-                if self.match_template(reactant, template)["first"]:
-                    values.append(1 if self.apply_reaction(reactant, template, None) else 0)
-                else:
-                    values.append(0)
-            self.template_mask_cache[key] = torch.tensor(values, dtype=torch.float32)
+            out = torch.zeros(len(self.templates), dtype=torch.float32)
+            for idx, template in self.templates.items():
+                if not self.match_template(reactant, template)["first"]:
+                    continue
+                ttype = template.get("type", "unimolecular")
+                if ttype in UNI_TYPES:
+                    if self.apply_reaction(reactant, template, None):
+                        out[idx] = 1.0
+                elif ttype == BI_TYPE:
+                    if self.apply_reaction(reactant, template, None):
+                        out[idx] = 1.0
+                        continue
+                    for r2 in self.get_valid_reactants(idx):
+                        if self.apply_reaction(reactant, template, r2):
+                            out[idx] = 1.0
+                            break
+            self.template_mask_cache[key] = out
         return self.template_mask_cache[key].clone()
 
     def get_mask(self, reactant: str | None, *, kind: str = "substructure") -> torch.Tensor:

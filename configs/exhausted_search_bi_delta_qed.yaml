@@ -3,12 +3,14 @@ experiment_name: ExhaustedSearch_Bi
 reaction_mode: bi
 masking: reaction_valid
 reward: delta_qed
-# Depth of the DFS tree. Each step in bi-mode branches on (template * R2),
-# so depth-cost scales as (T * R2_per_template)^depth. With the caps below
-# (102 templates feasible-filtered to ~20-40 per node, R2 capped to 10 per
-# template), depth=3 already explores ~10^4-10^6 paths per start. Bump to 5
-# only after confirming the depth=3 run completes within wallclock.
-max_episode_len: 3
+# Fully exhaustive bi-reaction DFS: every (template, R2) branch is expanded
+# from every starting molecule in reactants_test.pkl, up to depth 5. The
+# branching factor per node is (#feasible bi-templates) * (#valid R2 per
+# template), which for our 102 bi-templates and ~10^3 typical valid R2 per
+# template means each start can spawn ~10^5-10^10 paths at depth 5. This
+# run can therefore take a very long time; the slurm wallclock (36 h) and
+# wandb's per-attempt logging provide the only soft stops.
+max_episode_len: 5
 dataset:
   test_file: data/Bi/reactants_test.pkl
   templates_file: data/Bi/templates.pkl
@@ -18,19 +20,15 @@ env:
 training:
   seed: 42
 search:
-  # ---- Caps below make the DFS tractable for bi-reactions. ----
-  # Pure exhaustive bi search is intractable: 87 bi-templates x ~10^3
-  # average-feasible R2 per template x depth=3 = ~10^9 paths per start.
-  # Override these via environment variables (run_genmolrl_exhausted_bi.sh
-  # and the slurm wrapper plumb MAX_R2_PER_TEMPLATE / MAX_PATHS / MAX_STARTS
-  # into argparse on top of this YAML) when running on a smaller test set.
-  max_paths: 100000
+  # All numeric caps left unset on purpose: exhausted_search treats `None`
+  # as "no limit" (see genmolrl/algorithms/search.py L69-73). The only
+  # bound is `max_episode_len` above. If a particular run starts blowing
+  # past wallclock, re-add caps here or pass MAX_EPISODE_LEN=4 on the
+  # slurm submit line instead of editing this file.
+  max_paths:
   max_reactions:
-  max_starts: 200
-  # Cap R2 enumeration per (current_smiles, bi_template) at 10 partners.
-  # Without this, a single bi-template can spawn thousands of children for
-  # one DFS node — the depth-3 tree quickly hits 10^9 paths.
-  max_r2_per_template: 10
+  max_starts:
+  max_r2_per_template:
   results_file: runs/exhausted_search_bi_results.txt
   overwrite_results: true
   use_wandb: true

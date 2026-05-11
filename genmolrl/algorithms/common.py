@@ -55,14 +55,27 @@ def env_kwargs(config: dict, *, eval_env: bool = False) -> dict:
     dataset = config["dataset"]
     env_cfg = config["env"]
     max_episode_len = config.get("max_episode_len", env_cfg.get("max_episode_len", env_cfg.get("max_steps", 5)))
-    reactant_file = dataset["training_file"] if not eval_env else dataset.get("test_file")
+    algorithm_family = env_cfg["algorithm_family"]
+    # For `sb3_multidiscrete` (bi-reaction) the R2 axis is sized by the
+    # reactant pool, so the eval env MUST share the training pool or the
+    # MultiDiscrete([T+1, R2]) action head shape will mismatch. Source the
+    # held-out start molecules from `dataset.test_file` separately via
+    # `start_pool_file`. Other families (sb3_discrete, td3_pgfs,
+    # graphtransrl, graphtransppo) keep the legacy behaviour where the
+    # eval env loads `test_file` directly as its reactant pool.
+    if eval_env and algorithm_family == "sb3_multidiscrete":
+        reactant_file = dataset["training_file"]
+        start_pool_file = dataset.get("test_file")
+    else:
+        reactant_file = dataset["training_file"] if not eval_env else dataset.get("test_file")
+        start_pool_file = None
     if reactant_file is None:
         raise KeyError("dataset.test_file must be set for evaluation environments")
     kwargs = {
         "reactant_file": resolve_path(reactant_file),
         "template_file": resolve_path(dataset["templates_file"]),
         "reaction_mode": config["reaction_mode"],
-        "algorithm_family": env_cfg["algorithm_family"],
+        "algorithm_family": algorithm_family,
         "action_design": env_cfg.get("action_design", "discrete"),
         "masking": config["masking"],
         "reward": config["reward"],
@@ -76,6 +89,8 @@ def env_kwargs(config: dict, *, eval_env: bool = False) -> dict:
         "render_mode": "human" if eval_env else None,
         "append_action_mask_to_obs": env_cfg.get("append_action_mask_to_obs"),
     }
+    if start_pool_file is not None:
+        kwargs["start_pool_file"] = resolve_path(start_pool_file)
     if eval_env:
         kwargs["start_strategy"] = "cycle_pool"
     elif dataset.get("fixed_start_smiles"):

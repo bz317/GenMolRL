@@ -52,6 +52,7 @@ class MoleculeDesignEnv(gym.Env):
         reward_round_digits: int | None = None,
         info_qed_round_digits: int | None = None,
         append_action_mask_to_obs: bool | None = None,
+        start_pool_file: str | None = None,
     ):
         super().__init__()
         self.render_mode = render_mode
@@ -84,8 +85,20 @@ class MoleculeDesignEnv(gym.Env):
             qed_round_digits=info_qed_round_digits,
         )
         self.info_qed_round_digits = info_qed_round_digits
+        # `start_pool_file` lets the eval env source start molecules from a
+        # different pickle than the R2 bank in `self.reactants`. This is
+        # required for `sb3_multidiscrete` (bi-reaction) so the model's R2
+        # action head — sized to the training reactant pool — keeps the same
+        # dimension when evaluated on a held-out start pool. When None the
+        # legacy behaviour is preserved: start molecules are sampled from the
+        # same dict that backs R2 selection.
+        start_pool = (
+            load_pickle(Path(resolve_path(start_pool_file)))
+            if start_pool_file is not None
+            else self.reactants
+        )
         self.start_strategy = StartStrategy(start_strategy, fixed_start_smiles, start_smiles_file)
-        self.start_strategy.initialize(self.reactants)
+        self.start_strategy.initialize(start_pool)
 
         spec = ActionSpaceSpec(
             family=algorithm_family,

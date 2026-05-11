@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import random
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -119,6 +121,17 @@ class SearchRunner:
             wandb.init(**init_kw)
         self.all_steps: list[SearchStep] = []
         self.trajectory_summaries: list[dict] = []
+        self._traj_count: int = 0
+        self._delta_qed_sum: float = 0.0
+        self._num_reactions_sum: int = 0
+        self._stream_paths: Path | None = None
+        self._stream_trajs: Path | None = None
+        self._stream_progress_every: int = int(self.search_cfg.get("progress_every_starts", 100))
+        # How often to flush+fsync the streaming sidecar files (in paths).
+        # Defaults to 1 (every path) so visibility is immediate; set higher for fewer syscalls.
+        self._stream_flush_every_paths: int = int(self.search_cfg.get("flush_every_paths", 1))
+        # How often to print a path-level stdout heartbeat (in paths).
+        self._stream_path_heartbeat_every: int = int(self.search_cfg.get("path_heartbeat_every", 100))
 
     def _optional_int(self, key: str, default: int | None) -> int | None:
         value = self.search_cfg.get(key, default)
@@ -185,17 +198,38 @@ class SearchRunner:
                 candidates.append((idx, product, r2, reward))
         return candidates
 
+    # Field order shared across in-memory and streaming writers
+    _STEP_FIELDS = (
+        "path_id",
+        "step",
+        "reactant",
+        "template",
+        "product",
+        "qed",
+        "reward",
+        "second_reactant",
+    )
+    _TRAJ_FIELDS = (
+        "path_id",
+        "start_smiles",
+        "final_smiles",
+        "initial_qed",
+        "final_qed",
+        "max_qed",
+        "delta_qed",
+        "num_reactions",
+    )
+
+    @staticmethod
+    def _format_step_row(step: SearchStep) -> str:
+        row = step.__dict__
+        return "\t".join("" if row[k] is None else str(row[k]) for k in SearchRunner._STEP_FIELDS) + "\n"
+
+    @staticmethod
+    def _format_traj_row(item: dict) -> str:
+        return "\t".join(str(item.get(k, "")) for k in SearchRunner._TRAJ_FIELDS) + "\n"
+
     def _write_report(self, summary: dict) -> None:
-        fields = [
-            "path_id",
-            "step",
-            "reactant",
-            "template",
-            "product",
-            "qed",
-            "reward",
-            "second_reactant",
-        ]
         with self.result_file.open("w", encoding="utf-8") as f:
             f.write("# GenMolRL search results\n\n")
             f.write("[summary]\n")
@@ -203,24 +237,39 @@ class SearchRunner:
                 f.write(f"{key}: {value}\n")
             if self.trajectory_summaries:
                 f.write("\n[trajectories]\n")
-                trajectory_fields = [
-                    "path_id",
-                    "start_smiles",
-                    "final_smiles",
-                    "initial_qed",
-                    "final_qed",
-                    "max_qed",
-                    "delta_qed",
-                    "num_reactions",
-                ]
-                f.write("\t".join(trajectory_fields) + "\n")
+                f.write("\t".join(self._TRAJ_FIELDS) + "\n")
                 for item in self.trajectory_summaries:
-                    f.write("\t".join(str(item.get(k, "")) for k in trajectory_fields) + "\n")
+                    f.write(self._format_traj_row(item))
             f.write("\n[steps]\n")
-            f.write("\t".join(fields) + "\n")
+            f.write("\t".join(self._STEP_FIELDS) + "\n")
             for step in self.all_steps:
-                row = step.__dict__
-                f.write("\t".join("" if row[k] is None else str(row[k]) for k in fields) + "\n")
+                f.write(self._format_step_row(step))
+
+    def _consolidate_streamed_report(self, summary: dict) -> None:
+        """Stitch streamed `.trajectories.tmp` and `.steps.tmp` sidecar files into the final report."""
+        traj_tmp = self._stream_trajs
+        steps_tmp = self._stream_paths
+        with self.result_file.open("w", encoding="utf-8") as f:
+            f.write("# GenMolRL search results\n\n")
+            f.write("[summary]\n")
+            for key, value in summary.items():
+                f.write(f"{key}: {value}\n")
+            f.write("\n[trajectories]\n")
+            f.write("\t".join(self._TRAJ_FIELDS) + "\n")
+            if traj_tmp is not None and traj_tmp.exists():
+                with traj_tmp.open("r", encoding="utf-8") as tin:
+                    for line in tin:
+                        f.write(line)
+            f.write("\n[steps]\n")
+            f.write("\t".join(self._STEP_FIELDS) + "\n")
+            if steps_tmp is not None and steps_tmp.exists():
+                with steps_tmp.open("r", encoding="utf-8") as sin:
+                    for line in sin:
+                        f.write(line)
+        if traj_tmp is not None:
+            traj_tmp.unlink(missing_ok=True)
+        if steps_tmp is not None:
+            steps_tmp.unlink(missing_ok=True)
 
     def _reached_limit(self, saved_paths: int, total_reactions: int) -> bool:
         if self.max_paths is not None and saved_paths >= self.max_paths:
@@ -260,40 +309,43 @@ class SearchRunner:
             result_file = str(self.result_file.relative_to(project_root()))
         except ValueError:
             result_file = str(self.result_file)
-        deltas = [float(item["delta_qed"]) for item in self.trajectory_summaries]
-        reaction_counts = [int(item["num_reactions"]) for item in self.trajectory_summaries]
+        n = self._traj_count
+        mean_delta = self._delta_qed_sum / n if n else 0.0
+        mean_reactions = self._num_reactions_sum / n if n else 0.0
         return {
             "attempts": attempts,
             "saved_paths": saved_paths,
             "total_reactions": total_reactions,
             "max_qed": best_qed,
             "best_qed": best_qed,
-            "avg_delta_qed": float(np.mean(deltas)) if deltas else 0.0,
-            "mean_delta_qed": float(np.mean(deltas)) if deltas else 0.0,
-            "sum_delta_qed": float(np.sum(deltas)) if deltas else 0.0,
-            "num_start_molecules": len(self.trajectory_summaries),
-            "avg_num_reactions": float(np.mean(reaction_counts)) if reaction_counts else 0.0,
+            "avg_delta_qed": mean_delta,
+            "mean_delta_qed": mean_delta,
+            "sum_delta_qed": self._delta_qed_sum,
+            "num_start_molecules": n,
+            "avg_num_reactions": mean_reactions,
             "max_episode_len": self.max_steps,
             "greedy_mode": self.greedy_mode if self.mode == "greedy_search" else "",
             "results_file": result_file,
         }
 
-    def _record_trajectory(self, path_rows: list[SearchStep], initial_qed: float, path_id: int) -> None:
+    def _record_trajectory(self, path_rows: list[SearchStep], initial_qed: float, path_id: int) -> dict:
         final_row = path_rows[-1]
         final_qed = float(qed(final_row.product))
         path_max_qed = max(float(row.qed) for row in path_rows)
-        self.trajectory_summaries.append(
-            {
-                "path_id": path_id,
-                "start_smiles": path_rows[0].product,
-                "final_smiles": final_row.product,
-                "initial_qed": round(float(initial_qed), 6),
-                "final_qed": round(final_qed, 6),
-                "max_qed": round(path_max_qed, 6),
-                "delta_qed": round(final_qed - float(initial_qed), 6),
-                "num_reactions": len(path_rows) - 1,
-            }
-        )
+        summary = {
+            "path_id": path_id,
+            "start_smiles": path_rows[0].product,
+            "final_smiles": final_row.product,
+            "initial_qed": round(float(initial_qed), 6),
+            "final_qed": round(final_qed, 6),
+            "max_qed": round(path_max_qed, 6),
+            "delta_qed": round(final_qed - float(initial_qed), 6),
+            "num_reactions": len(path_rows) - 1,
+        }
+        self._traj_count += 1
+        self._delta_qed_sum += float(summary["delta_qed"])
+        self._num_reactions_sum += int(summary["num_reactions"])
+        return summary
 
     def _finish(self, summary: dict) -> dict:
         self._write_report(summary)
@@ -353,7 +405,9 @@ class SearchRunner:
                 total_reactions += 1
             reaction_steps = len(path_rows) - 1
             self.all_steps.extend(path_rows)
-            self._record_trajectory(path_rows, initial_qed, saved_paths)
+            self.trajectory_summaries.append(
+                self._record_trajectory(path_rows, initial_qed, saved_paths)
+            )
             saved_paths += 1
             self._log_search_progress(
                 attempts=starts_seen,
@@ -374,26 +428,45 @@ class SearchRunner:
         total_reactions = 0
         best_qed = 0.0
 
+        # Sidecar files for streaming output. Created fresh per run so a partial run still
+        # leaves a readable on-disk record (concatenated into the main report on completion).
+        # Writes happen inside `save_terminal` as soon as each path is finalised — disk
+        # therefore grows continuously regardless of how deep/wide a single start's DFS is.
+        self._stream_paths = self.result_file.with_suffix(".steps.tmp")
+        self._stream_trajs = self.result_file.with_suffix(".trajectories.tmp")
+        self._stream_paths.parent.mkdir(parents=True, exist_ok=True)
+        for p in (self._stream_paths, self._stream_trajs):
+            if p.exists():
+                p.unlink()
+
+        run_start = time.monotonic()
+        # File handles published into the save_terminal closure via this dict.
+        # Using a mutable container lets us define save_terminal/dfs before the `with`
+        # block opens the files, keeping the existing dfs recursion intact.
+        handles: dict[str, "object"] = {"steps": None, "traj": None}
+
         def save_terminal(path_rows: list[SearchStep], initial_qed: float) -> None:
             nonlocal saved_paths, best_qed
             if self.max_paths is not None and saved_paths >= self.max_paths:
                 return
-            finalized = []
-            for row in path_rows:
-                finalized.append(
-                    SearchStep(
-                        path_id=saved_paths,
-                        step=row.step,
-                        reactant=row.reactant,
-                        template=row.template,
-                        product=row.product,
-                        qed=row.qed,
-                        reward=row.reward,
-                        second_reactant=row.second_reactant,
-                    )
+            finalized = [
+                SearchStep(
+                    path_id=saved_paths,
+                    step=row.step,
+                    reactant=row.reactant,
+                    template=row.template,
+                    product=row.product,
+                    qed=row.qed,
+                    reward=row.reward,
+                    second_reactant=row.second_reactant,
                 )
-            self.all_steps.extend(finalized)
-            self._record_trajectory(finalized, initial_qed, saved_paths)
+                for row in path_rows
+            ]
+            summary = self._record_trajectory(finalized, initial_qed, saved_paths)
+            f_steps = handles["steps"]
+            f_traj = handles["traj"]
+            f_steps.writelines(self._format_step_row(s) for s in finalized)
+            f_traj.write(self._format_traj_row(summary))
             saved_paths += 1
             best_qed = max(best_qed, path_rows[-1].qed)
             self._log_search_progress(
@@ -405,6 +478,21 @@ class SearchRunner:
                 terminal_qed=path_rows[-1].qed,
                 best_qed=best_qed,
             )
+            if self._stream_flush_every_paths > 0 and saved_paths % self._stream_flush_every_paths == 0:
+                f_steps.flush()
+                f_traj.flush()
+            if (
+                self._stream_path_heartbeat_every > 0
+                and saved_paths % self._stream_path_heartbeat_every == 0
+            ):
+                elapsed = time.monotonic() - run_start
+                rate = saved_paths / elapsed if elapsed > 0 else 0.0
+                print(
+                    f"[exhausted/path] starts={starts_seen} saved_paths={saved_paths} "
+                    f"total_reactions={total_reactions} best_qed={best_qed:.3f} "
+                    f"elapsed={elapsed:.0f}s rate={rate:.1f} paths/s",
+                    flush=True,
+                )
 
         def dfs(current: str, path_rows: list[SearchStep], initial_qed: float) -> None:
             nonlocal total_reactions, best_qed
@@ -442,34 +530,68 @@ class SearchRunner:
                     initial_qed,
                 )
 
-        for start in self.reactant_keys:
-            if self._reached_limit(saved_paths, total_reactions):
-                break
-            if self.max_starts is not None and starts_seen >= self.max_starts:
-                break
-            if not _valid_smiles(start):
-                continue
-            starts_seen += 1
-            initial_qed = qed(start)
-            dfs(
-                start,
-                [
-                    SearchStep(
-                        path_id=-1,
-                        step=0,
-                        reactant=start,
-                        template="START",
-                        product=start,
-                        qed=round(initial_qed, 3),
-                        reward=0.0,
-                        second_reactant=None,
+        try:
+            with self._stream_paths.open("w", encoding="utf-8") as f_steps, \
+                    self._stream_trajs.open("w", encoding="utf-8") as f_traj:
+                handles["steps"] = f_steps
+                handles["traj"] = f_traj
+                for start in self.reactant_keys:
+                    if self._reached_limit(saved_paths, total_reactions):
+                        break
+                    if self.max_starts is not None and starts_seen >= self.max_starts:
+                        break
+                    if not _valid_smiles(start):
+                        continue
+                    starts_seen += 1
+                    initial_qed = qed(start)
+                    paths_before = saved_paths
+                    dfs(
+                        start,
+                        [
+                            SearchStep(
+                                path_id=-1,
+                                step=0,
+                                reactant=start,
+                                template="START",
+                                product=start,
+                                qed=round(initial_qed, 3),
+                                reward=0.0,
+                                second_reactant=None,
+                            )
+                        ],
+                        initial_qed,
                     )
-                ],
-                initial_qed,
+                    paths_for_start = saved_paths - paths_before
+                    # Per-start fsync gives a durable checkpoint on every completed start.
+                    f_steps.flush()
+                    f_traj.flush()
+                    os.fsync(f_steps.fileno())
+                    os.fsync(f_traj.fileno())
+                    if self._stream_progress_every > 0 and starts_seen % self._stream_progress_every == 0:
+                        elapsed = time.monotonic() - run_start
+                        rate = saved_paths / elapsed if elapsed > 0 else 0.0
+                        print(
+                            f"[exhausted/start] starts={starts_seen} last_paths={paths_for_start} "
+                            f"saved_paths={saved_paths} total_reactions={total_reactions} "
+                            f"best_qed={best_qed:.3f} elapsed={elapsed:.0f}s rate={rate:.1f} paths/s",
+                            flush=True,
+                        )
+        except BaseException:
+            # Surface what we have on disk before re-raising so SIGTERM/OOM still leave a usable trail.
+            print(
+                f"[exhausted] aborted after starts={starts_seen} saved_paths={saved_paths} "
+                f"total_reactions={total_reactions}; partial streams left at "
+                f"{self._stream_paths} and {self._stream_trajs}",
+                flush=True,
             )
+            raise
+
         summary = self._summary(starts_seen, saved_paths, total_reactions, best_qed)
         summary["starts_seen"] = starts_seen
-        return self._finish(summary)
+        self._consolidate_streamed_report(summary)
+        if self.use_wandb:
+            wandb.finish()
+        return summary
 
     def run(self):
         if self.mode == "exhausted_search":
