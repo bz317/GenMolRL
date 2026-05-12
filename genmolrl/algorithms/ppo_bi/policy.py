@@ -2,7 +2,7 @@
 
 Supports two parameterisations of the bi-reaction MultiDiscrete action space::
 
-    a = (T, R2),   T ∈ {0, …, num_templates - 1, STOP},   R2 ∈ {0, …, num_reactants - 1}
+    a = (T, R2),   T ∈ {0, …, num_templates - 1, STOP},   R2 ∈ {0, …, N_pool - 1}
 
   - ``hierarchical`` (autoregressive):
         π(a | s) = π_T(T | s) · π_R2(R2 | s, T)
@@ -15,10 +15,28 @@ Supports two parameterisations of the bi-reaction MultiDiscrete action space::
     independently (matching what SB3 ``MaskablePPO`` does on a flat
     MultiDiscrete action space, but kept under the same trainer for parity).
 
-In both modes the R2 logits are produced as a dot product against a learned
-per-reactant embedding so the parameter count grows linearly with the pool
-size. ``forward_trunk`` returns shared features once per state; the trainer
-drives sampling, masking, and log-prob accounting.
+R2 representation (``r2_arch``):
+
+  - ``lookup`` (legacy, default): a learned ``nn.Embedding(num_reactants,
+    r2_embed_dim)`` table. The R2 pool is fixed at training time; the
+    embedding row for the i-th reactant SMILES is keyed by its training-pool
+    index. **Cannot** be swapped between pools at eval time without
+    breaking the index mapping. Bit-identical to the original BiPolicy.
+
+  - ``encoder``: a small MLP that maps a Morgan fingerprint to an R2 key
+    vector. The pool is no longer baked into the parameters — any R2
+    SMILES can be embedded by computing ``encoder(morgan_fp(SMILES))``.
+    The trainer can swap the active pool (train ↔ test) between rollout
+    and evaluation; both pools use the same encoder weights, so the
+    R2 distribution generalises to unseen reactants in the chemistry
+    sense (same fingerprint → same key vector).
+
+``forward_trunk`` returns shared features once per state; the trainer
+drives sampling, masking, and log-prob accounting. ``r2_logits`` is the
+single call site that needs to know the active R2 pool: in encoder mode
+the trainer pre-computes ``r2_keys = encode_r2_pool(r2_fps)`` and passes
+them in; in lookup mode the trainer either passes ``None`` (defaulting to
+``r2_embed.weight``) or passes the same weight matrix for symmetry.
 """
 
 from __future__ import annotations
@@ -40,12 +58,16 @@ def _mlp(in_dim: int, hidden: int, out_dim: int, n_layers: int = 2) -> nn.Module
 class BiPolicy(nn.Module):
     """Actor-critic with a template head and an R2 head (T-conditional or not).
 
-    Action space: ``MultiDiscrete([num_templates + 1, num_reactants])`` where the
-    last template index is the STOP action.
+    Action space: ``MultiDiscrete([num_templates + 1, N_pool])`` where the
+    last template index is the STOP action and ``N_pool`` is the cardinality
+    of the *currently active* R2 pool (training pool during rollout/update;
+    optionally the test pool during evaluation, see ``r2_arch='encoder'``).
 
     Args:
         num_templates: number of reaction templates (excluding STOP).
-        num_reactants: size of the R2 reactant pool.
+        num_reactants: size of the training-time R2 pool. Only used to size
+            the ``r2_embed`` table in ``r2_arch='lookup'`` mode; ignored in
+            ``r2_arch='encoder'`` mode (the encoder works on any pool).
         conditional_r2: if True the R2 head consumes a per-template embedding
             (autoregressive / hierarchical mode); if False the R2 head only
             consumes the shared trunk (independent / multidiscrete mode).
@@ -53,7 +75,13 @@ class BiPolicy(nn.Module):
         trunk_hidden: hidden width of the shared trunk and heads.
         template_embed_dim: embedding dimension for the T-conditioning vector
             consumed by the R2 head; ignored when ``conditional_r2=False``.
-        r2_embed_dim: embedding dimension for the per-reactant query targets.
+        r2_embed_dim: dimension of the R2 query target vectors.
+        r2_arch: ``'lookup'`` (legacy fixed-pool ``nn.Embedding``) or
+            ``'encoder'`` (Morgan-FP MLP → r2_embed_dim, vocabulary-free).
+        r2_encoder_hidden: hidden width of the R2 encoder MLP. Only used when
+            ``r2_arch='encoder'``; defaults to ``obs_dim // 2``.
+        r2_fp_dim: input fingerprint dim for the R2 encoder MLP. Defaults to
+            ``obs_dim`` because the same Morgan-FP layout is used for R1 and R2.
     """
 
     def __init__(
@@ -66,6 +94,9 @@ class BiPolicy(nn.Module):
         trunk_hidden: int = 256,
         template_embed_dim: int = 64,
         r2_embed_dim: int = 64,
+        r2_arch: str = "lookup",
+        r2_encoder_hidden: int | None = None,
+        r2_fp_dim: int | None = None,
     ):
         super().__init__()
         self.num_templates = int(num_templates)
@@ -73,6 +104,13 @@ class BiPolicy(nn.Module):
         self.action_dim_t = self.num_templates + 1  # includes STOP
         self.stop_index = self.num_templates
         self.conditional_r2 = bool(conditional_r2)
+        self.r2_embed_dim = int(r2_embed_dim)
+
+        self.r2_arch = str(r2_arch).lower()
+        if self.r2_arch not in {"lookup", "encoder"}:
+            raise ValueError(
+                f"r2_arch must be 'lookup' or 'encoder', got {self.r2_arch!r}"
+            )
 
         self.trunk = nn.Sequential(
             nn.Linear(obs_dim, trunk_hidden),
@@ -103,7 +141,29 @@ class BiPolicy(nn.Module):
                 r2_embed_dim,
                 n_layers=2,
             )
-        self.r2_embed = nn.Embedding(self.num_reactants, r2_embed_dim)
+
+        if self.r2_arch == "lookup":
+            self.r2_embed = nn.Embedding(self.num_reactants, r2_embed_dim)
+            self.r2_encoder = None
+            self.r2_fp_dim = None
+        else:
+            # ``encoder``: R2 key = MLP(morgan_fp(R2_smiles)). The encoder is
+            # the SAME MLP at training and evaluation, so swapping the active
+            # R2 pool (train ↔ test) only changes which fingerprints get fed
+            # in; the parameters are shared and any unseen pool generalises
+            # in the standard "two-tower retrieval with a learned encoder"
+            # sense. The encoder is parameter-light (≈ obs_dim·hidden +
+            # hidden·r2_embed_dim) compared to a 100k-row lookup table.
+            self.r2_fp_dim = int(r2_fp_dim) if r2_fp_dim is not None else int(obs_dim)
+            r2_hidden = (
+                int(r2_encoder_hidden)
+                if r2_encoder_hidden is not None
+                else max(self.r2_fp_dim // 2, r2_embed_dim)
+            )
+            self.r2_encoder = _mlp(
+                self.r2_fp_dim, r2_hidden, r2_embed_dim, n_layers=2
+            )
+            self.r2_embed = None
 
     def forward_trunk(self, obs: torch.Tensor) -> torch.Tensor:
         return self.trunk(obs)
@@ -114,16 +174,43 @@ class BiPolicy(nn.Module):
     def value(self, trunk_feats: torch.Tensor) -> torch.Tensor:
         return self.value_head(trunk_feats).squeeze(-1)
 
+    def encode_r2_pool(self, r2_fps: torch.Tensor | None) -> torch.Tensor:
+        """Return ``r2_keys`` of shape ``(N_pool, r2_embed_dim)`` for the active pool.
+
+        In ``r2_arch='lookup'`` mode the static ``r2_embed.weight`` is returned
+        directly — ``r2_fps`` is ignored (the table is fixed to the training
+        pool). In ``r2_arch='encoder'`` mode the MLP is applied to the pool
+        fingerprints; the trainer must supply ``r2_fps`` (e.g. the train pool
+        FPs at rollout time, the test pool FPs at eval time). The output is
+        differentiable in encoder mode so PPO gradients flow into the encoder.
+        """
+        if self.r2_arch == "lookup":
+            return self.r2_embed.weight
+        if r2_fps is None:
+            raise ValueError(
+                "r2_arch='encoder' requires r2_fps to compute r2_keys"
+            )
+        return self.r2_encoder(r2_fps)
+
     def r2_logits(
-        self, trunk_feats: torch.Tensor, t_idx: torch.Tensor | None = None
+        self,
+        trunk_feats: torch.Tensor,
+        t_idx: torch.Tensor | None = None,
+        r2_keys: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """R2 logits over the full reactant pool.
+        """R2 logits over the current R2 pool.
 
         When ``conditional_r2=True`` ``t_idx`` must be a LongTensor of shape
         ``(batch,)`` containing valid template indices (excluding STOP). When
         ``conditional_r2=False`` ``t_idx`` is ignored — the R2 distribution
         is conditioned only on the state, matching independent MultiDiscrete
         sampling.
+
+        ``r2_keys`` is the ``(N_pool, r2_embed_dim)`` matrix that scores the
+        R2 axis. In ``r2_arch='lookup'`` mode passing ``None`` defaults to
+        ``self.r2_embed.weight``; in ``r2_arch='encoder'`` mode the trainer
+        must pre-compute and pass it (typically from
+        :meth:`encode_r2_pool`).
         """
         if self.conditional_r2:
             if t_idx is None:
@@ -134,7 +221,14 @@ class BiPolicy(nn.Module):
             query = self.r2_query_head(torch.cat([trunk_feats, tmpl_vec], dim=-1))
         else:
             query = self.r2_query_head(trunk_feats)
-        return query @ self.r2_embed.weight.T
+        if r2_keys is None:
+            if self.r2_arch == "encoder":
+                raise ValueError(
+                    "r2_arch='encoder' requires r2_keys for r2_logits() — "
+                    "compute via policy.encode_r2_pool(r2_fps) and pass in."
+                )
+            r2_keys = self.r2_embed.weight
+        return query @ r2_keys.T
 
 
 __all__ = ["BiPolicy"]

@@ -1,12 +1,15 @@
 #!/bin/bash
 #!
 #! SLURM job script for GenMolRL Bi-PPO MultiDiscrete
-#! (run_genmolrl_ppo_bi_multidiscrete.sh, SB3 MaskablePPO,
-#! MultiDiscrete([T+1, R2]) action space). Pair:
+#! (run_genmolrl_ppo_bi_multidiscrete.sh, hand-rolled BiPPO trainer with
+#! policy_arch=multidiscrete + r2_arch=encoder). Pair:
 #! run_launcher/HPC_scripts/bi/slurm_genmolrl_gpu_ppo_hierarchical.
-#! Mirrors run_launcher/HPC_scripts/uni/slurm_genmolrl_gpu_ppo, swapped to the bi-reaction
-#! launcher + config. Action space is MultiDiscrete([103, 116415]) so the
-#! policy network is heavier than uni; ampere GPU partition is recommended.
+#! Previously dispatched to SB3 MaskablePPO; now uses the unified hand-rolled
+#! trainer so R2 is encoder-based and eval uses only the test pool (matching
+#! ppo_bi_hierarchical / graphtransppo_bi / search baselines at eval). The
+#! action space is conceptually MultiDiscrete([103, R2_pool_size]); R2_pool_
+#! size is 116k during training (train pool) and 12.7k during evaluate()
+#! (test pool), via the encoder-driven pool swap inside BiPPO.evaluate().
 #!
 
 #!#############################################################
@@ -56,7 +59,7 @@ conda activate "${CONDA_ENV}"
 #! cases where sbatch is invoked from the project root, from
 #! `${PROJECT_ROOT}/run_launcher`, or from the directory holding this
 #! file itself. The last fallback is the hardcoded absolute path.
-LAUNCHER_REL="run_launcher/sh_files/run_genmolrl_ppo_bi_multidiscrete.sh"
+LAUNCHER_REL="run_launcher/HPC_sh_files/run_genmolrl_ppo_bi_multidiscrete.sh"
 for _cand in "${SLURM_SUBMIT_DIR}" "${SLURM_SUBMIT_DIR}/.." "${SLURM_SUBMIT_DIR}/../.." "${SLURM_SUBMIT_DIR}/../../.." "/home/bz317/rds/hpc-work/GenMolRL/GenMolRL"; do
   if [ -f "${_cand}/${LAUNCHER_REL}" ]; then
     PROJECT_ROOT="$(cd "${_cand}" && pwd)"

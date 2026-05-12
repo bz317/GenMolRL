@@ -209,17 +209,69 @@ class SearchRunner:
                 return candidate
         raise RuntimeError("Could not sample a valid starting molecule.")
 
-    def _choose_next(self, current: str) -> tuple[int, str, str | None, float] | None:
-        candidates = []
+    def _choose_random_strict(
+        self, current: str
+    ) -> tuple[int, str | None, str | None, float] | None:
+        """Strict two-stage uniform-random action selection for ``random_search``.
+
+        Algorithm (matches the README "Random Search (Bi)" contract):
+
+        1. ``T ~ Uniform(valid_templates(current))`` where the valid set is
+           the mask of ``self.masking`` — for bi runs this is normally
+           ``r2_available`` (R1 pattern match + ≥1 R2 pattern-match in the
+           pool).
+        2. For bi templates: ``R2 ~ Uniform(pattern_matched_R2s(T))``. For
+           uni templates: ``R2 = None``.
+        3. ``apply_reaction(current, T, R2)``. If it sanitises, return the
+           product + step reward. If it returns ``None`` (pattern-match
+           leak — possible under ``substructure`` / ``r2_available``),
+           return ``product=None`` with the configured invalid-reaction
+           penalty so the caller can record a ``-1`` step and terminate
+           the trajectory, matching the bi-PPO ``r2_available`` contract.
+
+        Returns ``None`` only for the two structural termination cases the
+        user spec calls out: (a) no valid templates, (b) bi template with
+        an empty R2 pattern-match set (shouldn't happen under
+        ``r2_available`` masking but kept as a defensive fallback).
+
+        Unlike the older "shuffle templates and take the first one whose
+        ``apply_reaction`` works" behaviour, this is a *true* random
+        baseline: each (T, R2) is sampled exactly once per step and a
+        sanitisation failure is a legitimate observed outcome, not a hint
+        to retry. That makes the metrics directly comparable to a bi-PPO
+        run that uses the same ``r2_available`` mask.
+        """
         template_indices = self._valid_template_indices(current)
+        if not template_indices:
+            return None
+        template_idx = random.choice(template_indices)
+        template = self.manager.templates[template_idx]
+        if template.get("type") == BI_TYPE:
+            partners = self.manager.get_valid_reactants(template_idx)
+            if not partners:
+                return None
+            r2 = random.choice(partners)
+        else:
+            r2 = None
+        product = self.manager.apply_reaction(current, template, r2)
+        if product is None:
+            return template_idx, None, r2, float(self.reward_fn.invalid_penalty)
+        return template_idx, product, r2, self.reward_fn.step_reward(current, product)
+
+    def _choose_next(self, current: str) -> tuple[int, str | None, str | None, float] | None:
+        # Random search is a one-shot uniform sample of T and R2; the older
+        # "shuffle templates, return first successful apply" path is
+        # replaced because it conflated "no valid templates" with "first N
+        # randomly-picked templates failed" and biased the action
+        # distribution toward templates that happen to have many valid R2s.
         if self.mode == "random_search":
-            random.shuffle(template_indices)
-        for idx in template_indices:
-            products = self._candidate_products(current, idx)
-            if self.mode == "random_search" and products:
-                product, r2, reward = random.choice(products)
-                return idx, product, r2, reward
-            for product, r2, reward in products:
+            return self._choose_random_strict(current)
+        # Greedy mode: enumerate all (T, R2) candidates and pick the max.
+        # Bit-identical to the previous implementation; the random_search
+        # branch is the only one that changed.
+        candidates = []
+        for idx in self._valid_template_indices(current):
+            for product, r2, reward in self._candidate_products(current, idx):
                 candidates.append((reward, idx, product, r2))
         if not candidates:
             return None
@@ -432,6 +484,29 @@ class SearchRunner:
                 if chosen is None:
                     break
                 template_idx, product, r2, reward = chosen
+                if product is None:
+                    # Strict bi random search: the sampled (T, R2) pair
+                    # passed the r2_available pattern mask but RDKit
+                    # refused to sanitise. Record the failed step with the
+                    # unchanged state (so final QED accounting reflects the
+                    # last good state) and the configured -1 reward, then
+                    # terminate this trajectory. This mirrors the
+                    # r2_available bi-PPO env contract on apply_reaction
+                    # failures and keeps the baseline directly comparable.
+                    path_rows.append(
+                        SearchStep(
+                            path_id=saved_paths,
+                            step=step_idx,
+                            reactant=current,
+                            template=self._template_name(template_idx),
+                            product=current,
+                            qed=round(qed(current), 3),
+                            reward=reward,
+                            second_reactant=r2,
+                        )
+                    )
+                    total_reactions += 1
+                    break
                 q = qed(product)
                 best_qed = max(best_qed, q)
                 path_rows.append(

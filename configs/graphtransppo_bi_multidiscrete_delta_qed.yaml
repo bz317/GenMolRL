@@ -1,0 +1,77 @@
+project: GenMolRL_Bi
+experiment_name: GraphTransPPO_Bi_MultiDiscrete
+reaction_mode: bi
+# r2_available is the default bi-mode masking (see the hierarchical config
+# for the full rationale). Pattern-match for T and the union-of-templates
+# pattern-match for R2, with apply_reaction failures surfacing as -1.
+masking: r2_available
+reward: delta_qed
+max_episode_len: 5
+dataset:
+  training_file: data/Bi/reactants_train.pkl
+  test_file: data/Bi/reactants_test.pkl
+  templates_file: data/Bi/templates.pkl
+  start_strategy: random_pool
+env:
+  # GraphTransBiPPO is hand-rolled (NOT SB3 MaskablePPO). The
+  # `multidiscrete` policy_arch below means π(T, R2 | R1) factorises as
+  # independent per-axis masked categoricals given the graph-encoded
+  # trunk z(R1) — the same factorisation SB3 MaskablePPO would learn
+  # over MultiDiscrete([T+1, R2]), but with the trunk as a
+  # GraphTransformer over the molecular graph instead of an MLP over a
+  # Morgan fingerprint.
+  algorithm_family: graphtransppo_bi_multidiscrete
+  use_stop_action: true
+  stop_early_penalty: -0.05
+  stop_penalty_until_step: 3
+  invalid_reaction_penalty: -1.0
+  reward_round_digits: 3
+  info_qed_round_digits: 3
+training:
+  seed: 42
+  total_timesteps: 1000000
+  eval_freq: 10000
+  save_freq: 100000
+graphtransppo_bi:
+  # 'multidiscrete' selects the independent R2 head: the R2 query depends
+  # only on z(R1), not on the sampled T. Use this only as a baseline /
+  # ablation against the hierarchical variant — the R2 distribution will
+  # be shared across templates, which is generally too coarse.
+  policy_arch: multidiscrete
+  # r2_arch controls the R2 representation (see ppo_bi YAMLs for full notes):
+  #   - 'lookup' (legacy): fixed nn.Embedding for the train R2 pool; eval
+  #     forced to draw R2 from the same train pool.
+  #   - 'encoder' (default): R2 keys = MLP(morgan_fp(R2_SMILES)). Shared
+  #     between train and test pools, so evaluate() can swap to
+  #     data/Bi/reactants_test.pkl and the policy only ever picks R2 from
+  #     test molecules at eval time. Required because the bi train/test
+  #     reactant pools in this dataset are completely disjoint.
+  r2_arch: encoder
+  # r2_encoder_hidden: 512  # defaults to r2_fp_dim // 2 in encoder mode
+  num_emb: 64
+  num_layers: 3
+  num_heads: 2
+  learning_rate: 0.0003
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  clip_range_vf: null
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: 0.02
+  template_embed_dim: 64
+  r2_embed_dim: 64
+  # Joint-rejection retry budget — only used when masking=reaction_valid
+  # AND policy_arch=multidiscrete (the union R2 mask doesn't guarantee a
+  # valid joint). With masking=r2_available the loop is single-shot and
+  # this knob is dormant; kept here for parity with the hierarchical
+  # YAML and for the case where a user flips masking to reaction_valid.
+  r2_resample_retries: 16
+  normalize_advantage: true
+  weight_decay: 0.0
+  adam_eps: 0.00001
+  device: null

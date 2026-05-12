@@ -58,6 +58,23 @@ ppo_bi:
   # r2_mask_kind=true_valid to compare a pattern-only template mask against
   # a true-valid R2 mask). Most users should leave this unset.
   # r2_mask_kind: true_valid
+  #
+  # r2_arch controls the R2 representation:
+  #   - 'lookup' (legacy): nn.Embedding(num_reactants_train, r2_embed_dim).
+  #     The R2 vocabulary is baked at training time; eval rollouts are forced
+  #     to draw R2 from the same train pool (because the indices/embeddings
+  #     don't exist for any other pool). This is the original Bi-PPO setup
+  #     used by run 29212532 etc.
+  #   - 'encoder' (default): r2_keys = MLP(morgan_fp(R2_SMILES)). The R2
+  #     encoder is shared between train and test pools, so evaluate() swaps
+  #     the active pool to data/Bi/reactants_test.pkl and the policy only
+  #     ever picks R2 from test molecules at eval time. This is the only
+  #     way to get "strict test-only R2 at evaluation" since the bi train
+  #     and test reactant pools are completely disjoint in this dataset.
+  #     Trade-off: every PPO minibatch re-encodes the train R2 pool (~116k
+  #     fingerprints through a small MLP) to flow gradients into the encoder.
+  r2_arch: encoder
+  # r2_encoder_hidden: 512  # defaults to obs_dim // 2 = 512 in encoder mode
   learning_rate: 0.0003
   n_steps: 2048
   batch_size: 64

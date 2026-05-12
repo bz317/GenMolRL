@@ -1,7 +1,16 @@
 #!/bin/bash
 #!
-#! SLURM job script for GenMolRL A2C (run_genmolrl_a2c.sh) on GPU
-#! Template aligned with new_mol_with_RL_GNN/hpc_scripts/slurm_new_mol_gpu_td3
+#! SLURM job script for GenMolRL Bi-GraphTransPPO MultiDiscrete
+#! (run_genmolrl_graphtransppo_bi_multidiscrete.sh, hand-rolled
+#! GraphTransBiPPO trainer with π(T | R1) · π(R2 | R1) independent-axis
+#! policy on a GraphTransformer encoder over R1). Pair:
+#! run_launcher/HPC_scripts/bi/slurm_genmolrl_gpu_graphtransppo_hierarchical.
+#!
+#! Multidiscrete is the baseline / ablation against the hierarchical
+#! variant; the R2 distribution is shared across templates, which makes
+#! learning a useful R2 selector harder than under the hierarchical T-
+#! conditional R2 head. Same GraphTransformer encoder, same compute
+#! profile as the hierarchical SLURM script.
 #!
 
 #!#############################################################
@@ -10,25 +19,25 @@
 
 #! sbatch directives begin here ###############################
 #! Name of the job:
-#SBATCH -J genmolrl_a2c
+#SBATCH -J genmolrl_graphppo_bi_md
 #! Which project should be charged (NB Wilkes2 projects end in '-GPU'):
-#SBATCH -A OZTIRELI-SL2-GPU
+#SBATCH -A MLMI-BZ317-SL2-GPU
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
-#SBATCH --time=24:00:00
+#SBATCH --time=36:00:00
 #SBATCH --mail-user=bz317@cam.ac.uk
 #SBATCH --mail-type=ALL
 
 #SBATCH -p ampere
 
-##SBATCH -o logs/a2c_%j.out
-##SBATCH -e logs/a2c_%j.err
+##SBATCH -o logs/graphtransppo_bi_md_%j.out
+##SBATCH -e logs/graphtransppo_bi_md_%j.err
 
 #! sbatch directives end here #################################
 
 #! Optional overrides: CONDA_ENV, REACTION_MODE, MASKING, REWARD, CONFIG, EXPERIMENT_NAME
-#! Submit: cd /home/bz317/rds/hpc-work/GenMolRL/GenMolRL && sbatch run_launcher/HPC_scripts/uni/slurm_genmolrl_gpu_a2c
+#! Submit: cd /home/bz317/rds/hpc-work/GenMolRL/GenMolRL && sbatch run_launcher/HPC_scripts/bi/slurm_genmolrl_gpu_graphtransppo_multidiscrete
 
 numnodes=$SLURM_JOB_NUM_NODES
 numtasks=$SLURM_NTASKS
@@ -44,11 +53,9 @@ CONDA_ENV="${CONDA_ENV:-RL_for_new_mol}"
 conda activate "${CONDA_ENV}"
 
 #! Resolve the project root (the directory holding `genmolrl/`, `configs/`,
-#! `data/`, `runs/`, `run_launcher/`, ...). The fallback chain handles the
-#! cases where sbatch is invoked from the project root, from
-#! `${PROJECT_ROOT}/run_launcher`, or from the directory holding this
-#! file itself. The last fallback is the hardcoded absolute path.
-LAUNCHER_REL="run_launcher/HPC_sh_files/run_genmolrl_a2c.sh"
+#! `data/`, `runs/`, `run_launcher/`, ...). Same fallback chain as the
+#! hierarchical SLURM script so the two are submit-from-anywhere safe.
+LAUNCHER_REL="run_launcher/HPC_sh_files/run_genmolrl_graphtransppo_bi_multidiscrete.sh"
 for _cand in "${SLURM_SUBMIT_DIR}" "${SLURM_SUBMIT_DIR}/.." "${SLURM_SUBMIT_DIR}/../.." "${SLURM_SUBMIT_DIR}/../../.." "/home/bz317/rds/hpc-work/GenMolRL/GenMolRL"; do
   if [ -f "${_cand}/${LAUNCHER_REL}" ]; then
     PROJECT_ROOT="$(cd "${_cand}" && pwd)"
@@ -65,14 +72,11 @@ cd "${PROJECT_ROOT}"
 mkdir -p logs
 JOBID=$SLURM_JOB_ID
 
-# The YAML config in $LAUNCHER_PATH owns `experiment_name`. We only export
-# `WANDB_RUN_POST_APPEND` so `run_experiment.py` tags the run name with a
-# `_HPC` suffix (or whatever the user provided). The launcher itself never
-# hardcodes EXPERIMENT_NAME, so the YAML stays the source of truth.
+# YAML owns experiment_name; SLURM only tags the run with _HPC.
 export WANDB_RUN_POST_APPEND="${WANDB_RUN_POST_APPEND:-HPC}"
 
 CMD="bash \"${LAUNCHER_PATH}\""
-CMD="$CMD 2>&1 | tee logs/a2c_${JOBID}.log"
+CMD="$CMD 2>&1 | tee logs/graphtransppo_bi_md_${JOBID}.log"
 
 echo -e "JobID: $JOBID\n======"
 echo "Time: $(date)"

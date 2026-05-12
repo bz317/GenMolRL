@@ -71,7 +71,7 @@ conda activate "${CONDA_ENV}"
 # td3_balance shares the same launcher as TD3 continuous; it differs only
 # in the YAML config (`configs/td3_uni_masked_balance_delta_qed.yaml`),
 # which we pin via CONFIG=... below.
-LAUNCHER_REL="run_launcher/sh_files/run_genmolrl_td3_continuous.sh"
+LAUNCHER_REL="run_launcher/HPC_sh_files/run_genmolrl_td3_continuous.sh"
 export CONFIG="${CONFIG:-configs/td3_uni_masked_balance_delta_qed.yaml}"
 for _cand in "${SLURM_SUBMIT_DIR}" "${SLURM_SUBMIT_DIR}/.." "${SLURM_SUBMIT_DIR}/../.." "${SLURM_SUBMIT_DIR}/../../.." "/home/bz317/rds/hpc-work/GenMolRL/GenMolRL"; do
   if [ -f "${_cand}/${LAUNCHER_REL}" ]; then

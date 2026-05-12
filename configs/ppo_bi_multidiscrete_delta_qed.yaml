@@ -17,36 +17,65 @@ dataset:
   templates_file: data/Bi/templates.pkl
   start_strategy: random_pool
 env:
-  # Bi-reaction needs MultiDiscrete([T+1, R2]) so the policy can pick a
-  # second reactant alongside the template. With the current Bi templates
-  # this resolves to MultiDiscrete([103, 116415]) at runtime; the masking
-  # layer marks T as feasible-only (r2_available: R1 match + ≥1 pattern-
-  # compatible R2 in the pool) and leaves R2 fully available to mirror
-  # genmolrl/envs/masking.py:multidiscrete_mask.
-  algorithm_family: sb3_multidiscrete
-  action_design: discrete
+  # ppo_bi (multidiscrete) is the hand-rolled BiPPO trainer with
+  # ``policy_arch=multidiscrete``. The fields below mirror the env settings
+  # the trainer reads directly (use_stop_action, invalid_reaction_penalty,
+  # etc.) so behaviour is comparable to ppo_bi_hierarchical and the
+  # graphtransppo_bi configs. Previously this YAML wired up SB3's
+  # ``MaskablePPO`` over ``MultiDiscrete([T+1, R2])`` via
+  # ``algorithm_family: sb3_multidiscrete``; the unified hand-rolled trainer
+  # supports both policy architectures (``hierarchical`` and
+  # ``multidiscrete``) AND the encoder-based R2 head (``r2_arch=encoder``),
+  # so we no longer maintain a separate SB3 code path here. The math is
+  # identical: π(T, R2 | s) = π_T(T | s) · π_R2(R2 | s).
+  algorithm_family: ppo_bi_multidiscrete
   use_stop_action: true
-  stop_early_penalty: 0.0
+  stop_early_penalty: -0.05
   stop_penalty_until_step: 3
   invalid_reaction_penalty: -1.0
   reward_round_digits: 3
   info_qed_round_digits: 3
-  # Default would concatenate the full T+R2 mask onto the 1024-dim Morgan
-  # FP, ballooning obs to ~118k dims. MaskablePPO already pulls masks via
-  # env.action_masks() so there's no need to ship them through the obs;
-  # disabling this keeps the policy MLP at ~67k input weights instead of
-  # ~7.5M and dramatically speeds up rollouts.
-  append_action_mask_to_obs: false
 training:
   seed: 42
   total_timesteps: 1000000
   eval_freq: 10000
-  n_envs: 1
-ppo:
-  # PPO knobs are kept identical to configs/ppo_uni_masked_delta_qed.yaml
-  # so any Bi-vs-Uni delta is attributable to the action space, not the
-  # learning rule. Tune later (e.g. lower lr, larger n_steps) once the
-  # MultiDiscrete head is confirmed to learn.
+  save_freq: 100000
+ppo_bi:
+  # Bi-PPO supports two policy architectures:
+  #   - 'hierarchical': π(T, R2) = π_T(T) · π_R2(R2|T). The R2 head is
+  #     conditioned on the sampled template; the R2 mask is per-(state, T).
+  #     See configs/ppo_bi_hierarchical_delta_qed.yaml.
+  #   - 'multidiscrete' (this YAML): π(T, R2) = π_T(T) · π_R2(R2). T and R2
+  #     are sampled independently (matching what SB3 MaskablePPO does over
+  #     MultiDiscrete([T+1, R2])). The R2 mask is per-state (union over
+  #     valid templates). With masking=reaction_valid the joint (T, R2) is
+  #     not guaranteed valid even when each axis is — the trainer applies
+  #     joint rejection sampling (see r2_resample_retries below) to enforce
+  #     the zero-(-1) contract. With masking=r2_available / substructure no
+  #     rejection happens; the rare sanitisation failures surface as -1 and
+  #     the policy learns from the failure signal.
+  policy_arch: multidiscrete
+  # r2_arch controls the R2 representation (see ppo_bi_hierarchical for
+  # the full notes):
+  #   - 'lookup' (legacy): nn.Embedding(num_reactants_train, r2_embed_dim).
+  #     The R2 vocabulary is baked at training time; eval rollouts are
+  #     forced to draw R2 from the same train pool.
+  #   - 'encoder' (default): r2_keys = MLP(morgan_fp(R2_SMILES)). Shared
+  #     between train and test pools, so evaluate() swaps the active pool
+  #     to data/Bi/reactants_test.pkl and the policy only ever picks R2
+  #     from test molecules at eval time. This is the only way to get
+  #     "strict test-only R2 at evaluation" since the bi train/test
+  #     reactant pools are completely disjoint, and is what makes
+  #     ppo_bi_multidiscrete directly comparable to ppo_bi_hierarchical /
+  #     graphtransppo_bi / search baselines at eval time.
+  r2_arch: encoder
+  # r2_encoder_hidden: 512  # defaults to obs_dim // 2 = 512 in encoder mode
+  # r2_mask_kind is derived from `masking` automatically:
+  #   reaction_valid -> true_valid  (zero -1)
+  #   substructure / r2_available -> pattern  (-1 allowed)
+  # PPO knobs are kept identical to the hierarchical YAML so the only axis
+  # of comparison between hierarchical and multidiscrete is the policy
+  # factorisation (T-conditional vs independent).
   learning_rate: 0.0003
   n_steps: 2048
   batch_size: 64
@@ -54,11 +83,17 @@ ppo:
   gamma: 0.99
   gae_lambda: 0.95
   clip_range: 0.2
-  ent_coef: 0.0
+  ent_coef: 0.01
   vf_coef: 0.5
   max_grad_norm: 0.5
   target_kl: 0.02
-  progress_bar: false
-callbacks:
-  model_save_freq: 100000
-  gradient_save_freq: 100
+  trunk_hidden: 256
+  template_embed_dim: 64
+  r2_embed_dim: 64
+  # Joint-rejection retry budget. Used ONLY when masking=reaction_valid AND
+  # policy_arch=multidiscrete (the union R2 mask doesn't guarantee a valid
+  # joint, so we retry up to N times to find a sanitising (T, R2) pair).
+  # With masking=r2_available / substructure no rejection happens; this
+  # knob is dormant.
+  r2_resample_retries: 16
+  normalize_advantage: true

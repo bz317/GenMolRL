@@ -208,23 +208,42 @@ class BiPPO:
         self.stop_early_penalty = float(env_cfg.get("stop_early_penalty", 0.0))
         self.stop_penalty_until_step = int(env_cfg.get("stop_penalty_until_step", -1))
 
-        manager_source = (
+        # Build the *training-pool* reaction manager. This is the
+        # reaction_manager / reactant_keys / num_reactants that the rollout
+        # loop and the PPO update use. The active-pool attributes are
+        # initialised to this train pool below; ``evaluate()`` temporarily
+        # swaps them to the eval-pool versions when r2_arch='encoder'.
+        train_manager_source = (
             self.train_reactants
             if isinstance(self.train_reactants, dict)
             else {s: None for s in self.train_smiles}
         )
-        self.reaction_manager = ReactionManager(self.templates_raw, manager_source)
-        self.reaction_manager.templates = self.reaction_manager.templates_for_mode("bi")
-        self.reaction_manager.template_keys = list(self.reaction_manager.templates.keys())
-        self.reaction_manager.template_mask_cache.clear()
-        self.reaction_manager._bi_r2_valid_cache = {}
+        self._train_reaction_manager = ReactionManager(
+            self.templates_raw, train_manager_source
+        )
+        self._train_reaction_manager.templates = (
+            self._train_reaction_manager.templates_for_mode("bi")
+        )
+        self._train_reaction_manager.template_keys = list(
+            self._train_reaction_manager.templates.keys()
+        )
+        self._train_reaction_manager.template_mask_cache.clear()
+        self._train_reaction_manager._bi_r2_valid_cache = {}
 
-        self.num_templates = len(self.reaction_manager.templates)
+        self.num_templates = len(self._train_reaction_manager.templates)
         self.stop_index = self.num_templates
-        self.reactant_keys = list(self.reaction_manager.reactants.keys())
-        self.num_reactants = len(self.reactant_keys)
+        self._train_reactant_keys = list(self._train_reaction_manager.reactants.keys())
+        self._train_num_reactants = len(self._train_reactant_keys)
 
-        method_cfg = config.get("ppo_bi", config.get("ppo", {}))
+        # Active-pool aliases. The rollout / update / sampling code paths
+        # below read these (NOT the underscore-prefixed pool-specific
+        # attributes), so pool swapping is a 3-attribute rebind in
+        # ``evaluate()``.
+        self.reaction_manager = self._train_reaction_manager
+        self.reactant_keys = self._train_reactant_keys
+        self.num_reactants = self._train_num_reactants
+
+        method_cfg = self._method_cfg(config)
         self.device = torch.device(
             method_cfg.get("device") or ("cuda" if torch.cuda.is_available() else "cpu")
         )
@@ -235,6 +254,26 @@ class BiPPO:
                 f"policy_arch must be 'hierarchical' or 'multidiscrete', got "
                 f"{self.policy_arch!r}"
             )
+
+        # R2 representation. ``lookup`` is the legacy fixed-pool
+        # ``nn.Embedding`` (bit-identical to the original BiPolicy). ``encoder``
+        # is a Morgan-FP MLP shared between train and eval, so the R2 pool can
+        # be swapped at evaluation time (train pool during rollout / update;
+        # test pool during evaluate()). This is the only way to satisfy
+        # "evaluate using only test molecules for R2" because the bi train and
+        # test reactant pools are completely disjoint in this dataset.
+        self.r2_arch = str(method_cfg.get("r2_arch", "lookup")).lower()
+        if self.r2_arch not in {"lookup", "encoder"}:
+            raise ValueError(
+                f"r2_arch must be 'lookup' or 'encoder', got {self.r2_arch!r}"
+            )
+        # ``encoder`` mode is the only setting where the eval-time R2 pool
+        # differs from the training-time R2 pool. In lookup mode the table is
+        # baked at training time and the eval rollouts MUST share that pool,
+        # so ``_eval_pool_role='train'`` makes ``_swap_active_pool('train')``
+        # a no-op during evaluate(). In encoder mode ``_eval_pool_role='eval'``
+        # swaps the active pool to ``_eval_reaction_manager`` (= test pool).
+        self._eval_pool_role = "eval" if self.r2_arch == "encoder" else "train"
 
         # Derive the R2-axis mask source from the masking mode (the README
         # contract). reaction_valid → RDKit-validated set (zero -1 guarantee);
@@ -266,21 +305,68 @@ class BiPPO:
             self._enforce_zero_invalid and self.policy_arch == "multidiscrete"
         )
 
-        self.policy = BiPolicy(
-            num_templates=self.num_templates,
-            num_reactants=self.num_reactants,
-            conditional_r2=(self.policy_arch == "hierarchical"),
-            obs_dim=1024,
-            trunk_hidden=int(method_cfg.get("trunk_hidden", 256)),
-            template_embed_dim=int(method_cfg.get("template_embed_dim", 64)),
-            r2_embed_dim=int(method_cfg.get("r2_embed_dim", 64)),
-        ).to(self.device)
+        self.policy = self._build_policy(method_cfg)
         self.optimizer = torch.optim.Adam(
             self.policy.parameters(),
             lr=float(method_cfg.get("learning_rate", 3e-4)),
             weight_decay=float(method_cfg.get("weight_decay", 0.0)),
             eps=float(method_cfg.get("adam_eps", 1e-5)),
         )
+
+        # Build the eval-pool reaction manager from the test reactants. Only
+        # needed in r2_arch='encoder' mode (the lookup mode forces eval to
+        # share the train pool because the embedding indices are baked in).
+        # Pre-compute the R2 fingerprint tensors once so the rollout / eval
+        # loops can just slice them; the policy's R2 encoder MLP is applied
+        # to these FPs on the fly to produce r2_keys.
+        if self.r2_arch == "encoder":
+            test_manager_source = (
+                self.test_reactants
+                if isinstance(self.test_reactants, dict)
+                else {s: None for s in self.test_smiles}
+            )
+            self._eval_reaction_manager = ReactionManager(
+                self.templates_raw, test_manager_source
+            )
+            self._eval_reaction_manager.templates = (
+                self._eval_reaction_manager.templates_for_mode("bi")
+            )
+            self._eval_reaction_manager.template_keys = list(
+                self._eval_reaction_manager.templates.keys()
+            )
+            self._eval_reaction_manager.template_mask_cache.clear()
+            self._eval_reaction_manager._bi_r2_valid_cache = {}
+            self._eval_reactant_keys = list(
+                self._eval_reaction_manager.reactants.keys()
+            )
+            self._eval_num_reactants = len(self._eval_reactant_keys)
+
+            # Pre-compute Morgan fingerprints for both pools as torch tensors.
+            # These feed the R2 encoder MLP at every sampling / update call;
+            # building them once at init avoids per-step morgan_fp overhead.
+            train_fp_np = np.stack(
+                [morgan_fp_array(s) for s in self._train_reactant_keys], axis=0
+            )
+            test_fp_np = np.stack(
+                [morgan_fp_array(s) for s in self._eval_reactant_keys], axis=0
+            )
+            self._train_r2_fps = torch.from_numpy(train_fp_np).float().to(self.device)
+            self._eval_r2_fps = torch.from_numpy(test_fp_np).float().to(self.device)
+        else:
+            # lookup mode: eval shares the train pool (same managers / keys /
+            # FPs). Pointing the eval-pool attributes at the train pool keeps
+            # ``_swap_active_pool('eval')`` a no-op for backward compatibility.
+            self._eval_reaction_manager = self._train_reaction_manager
+            self._eval_reactant_keys = self._train_reactant_keys
+            self._eval_num_reactants = self._train_num_reactants
+            self._train_r2_fps = None
+            self._eval_r2_fps = None
+
+        # Cached r2_keys for the active scope. Populated by
+        # ``_compute_active_r2_keys`` at the start of each rollout / eval
+        # sweep (no_grad) and recomputed per minibatch inside the PPO update
+        # (with_grad), so MLP weight updates flow through into r2_keys.
+        self._active_r2_keys: torch.Tensor | None = None
 
         # PPO knobs (defaults match graphtransppo/MaskablePPO).
         self.gamma = float(method_cfg.get("gamma", 0.99))
@@ -326,6 +412,107 @@ class BiPPO:
         self._stop_event_count: int = 0
         self._rejection_total: int = 0
         self._sample_calls: int = 0
+
+    # ------------------------------------------------------------------
+    # Subclass hooks
+    # ------------------------------------------------------------------
+    # Subclasses (e.g. GraphTransBiPPO) override these three small methods to
+    # swap the encoder while reusing the entire PPO core (rollout loop,
+    # masking, hierarchical/multidiscrete sampling, rejection logic, GAE,
+    # clipped surrogate, value clipping, target_kl early stop, etc.). The
+    # default implementations below preserve the original BiPolicy +
+    # Morgan-fingerprint trainer behaviour bit-for-bit.
+
+    def _method_cfg(self, config: dict) -> dict:
+        """Return the method-specific config block (overridable by subclasses).
+
+        Default reads ``config['ppo_bi']`` and falls back to ``config['ppo']``
+        for shared PPO knobs. Subclasses (e.g. GraphTransBiPPO) point this at
+        their own config block but keep the PPO defaults compatible.
+        """
+        return config.get("ppo_bi", config.get("ppo", {}))
+
+    def _build_policy(self, method_cfg: dict) -> torch.nn.Module:
+        """Construct the policy module (overridable by subclasses).
+
+        Default builds ``BiPolicy`` (Morgan-FP MLP trunk + BiPolicy heads) and
+        moves it to ``self.device``. Subclasses can return any module that
+        exposes ``forward_trunk``, ``template_logits``, ``value``, and
+        ``r2_logits`` with the same signatures so the rollout loop and PPO
+        update are encoder-agnostic.
+        """
+        return BiPolicy(
+            num_templates=self.num_templates,
+            num_reactants=self.num_reactants,
+            conditional_r2=(self.policy_arch == "hierarchical"),
+            obs_dim=1024,
+            trunk_hidden=int(method_cfg.get("trunk_hidden", 256)),
+            template_embed_dim=int(method_cfg.get("template_embed_dim", 64)),
+            r2_embed_dim=int(method_cfg.get("r2_embed_dim", 64)),
+            r2_arch=self.r2_arch,
+            r2_encoder_hidden=method_cfg.get("r2_encoder_hidden"),
+        ).to(self.device)
+
+    def _encode_smiles(self, smiles_list: list[str]) -> torch.Tensor:
+        """Map a list of SMILES to trunk features ``z(R1) ∈ R^{B x trunk_dim}``.
+
+        Default builds a Morgan-fingerprint batch and runs ``policy.
+        forward_trunk(fps)``. Subclasses override this to plug in any other
+        encoder (e.g. ``GraphTransBiPPO`` runs the GraphTransformer over the
+        molecular graphs) without changing the rollout loop or PPO update.
+        """
+        fps = np.stack([morgan_fp_array(s) for s in smiles_list], axis=0)
+        return self.policy.forward_trunk(torch.from_numpy(fps).to(self.device))
+
+    # ------------------------------------------------------------------
+    # Active-pool helpers (r2_arch='encoder' swaps train ↔ test at eval)
+    # ------------------------------------------------------------------
+
+    def _swap_active_pool(self, pool: str) -> None:
+        """Point ``self.reaction_manager`` / ``reactant_keys`` / ``num_reactants``
+        at the named pool.
+
+        Only ``r2_arch='encoder'`` mode has distinct train and eval pools; in
+        ``lookup`` mode both attributes alias the train pool and this call is
+        a structural no-op. Callers MUST restore the previous pool by calling
+        ``_swap_active_pool('train')`` after the eval section (see
+        :meth:`evaluate`); we keep the swap explicit (rather than a context
+        manager) so the sampling functions don't have to thread a pool
+        argument through the rollout loop's hot path.
+        """
+        if pool == "train":
+            self.reaction_manager = self._train_reaction_manager
+            self.reactant_keys = self._train_reactant_keys
+            self.num_reactants = self._train_num_reactants
+        elif pool == "eval":
+            self.reaction_manager = self._eval_reaction_manager
+            self.reactant_keys = self._eval_reactant_keys
+            self.num_reactants = self._eval_num_reactants
+        else:
+            raise ValueError(f"pool must be 'train' or 'eval', got {pool!r}")
+
+    def _compute_active_r2_keys(self, *, pool: str, with_grad: bool) -> torch.Tensor:
+        """Return ``r2_keys`` for the named pool, honouring the grad context.
+
+        In ``r2_arch='lookup'`` mode this returns ``self.policy.r2_embed.weight``
+        regardless of pool (the embedding is fixed to the train pool by design).
+        In ``r2_arch='encoder'`` mode the policy's R2 MLP is applied to the
+        pool's pre-computed Morgan fingerprints. ``with_grad=False`` is used
+        for rollouts and evaluation (one forward pass per sweep, no autograd);
+        ``with_grad=True`` is used inside the PPO update so gradients flow
+        into the encoder MLP each minibatch.
+        """
+        if self.r2_arch == "lookup":
+            return self.policy.r2_embed.weight
+        r2_fps = self._train_r2_fps if pool == "train" else self._eval_r2_fps
+        if r2_fps is None:
+            raise RuntimeError(
+                f"r2_arch='encoder' but {pool} pool r2_fps is not initialised."
+            )
+        if with_grad:
+            return self.policy.encode_r2_pool(r2_fps)
+        with torch.no_grad():
+            return self.policy.encode_r2_pool(r2_fps)
 
     # ------------------------------------------------------------------
     # Masks
@@ -386,6 +573,12 @@ class BiPPO:
     # ------------------------------------------------------------------
 
     def _fp(self, smiles: str) -> torch.Tensor:
+        """Backward-compatible single-SMILES Morgan-fingerprint helper.
+
+        Kept for callers outside this module that still expect the
+        fingerprint-tensor API. The trainer itself now goes through
+        ``_encode_smiles`` so a graph-aware subclass needs no extra hooks.
+        """
         return torch.from_numpy(morgan_fp_array(smiles)).to(self.device)
 
     def _sample_action(
@@ -417,8 +610,7 @@ class BiPPO:
         may fail and the trainer returns ``product=None``, which the rollout
         loop records as an ``invalid_reaction_penalty`` transition.
         """
-        fp = self._fp(smiles).unsqueeze(0)
-        trunk = self.policy.forward_trunk(fp)
+        trunk = self._encode_smiles([smiles])
         tmpl_logits = self.policy.template_logits(trunk)
         value = float(self.policy.value(trunk).item())
 
@@ -444,7 +636,9 @@ class BiPPO:
             return self._stop_return(value, tmpl_mask, log_pi_t=log_pi_t)
 
         r2_logits_all = self.policy.r2_logits(
-            trunk, torch.tensor([t_idx], device=self.device, dtype=torch.long)
+            trunk,
+            torch.tensor([t_idx], device=self.device, dtype=torch.long),
+            r2_keys=self._active_r2_keys,
         )[0]
         masked_r2_logits = r2_logits_all.masked_fill(~r2_mask, -1e9)
         r2_dist = torch.distributions.Categorical(logits=masked_r2_logits)
@@ -501,8 +695,7 @@ class BiPPO:
         if ``apply_reaction`` fails (this is the README contract for those
         masking modes).
         """
-        fp = self._fp(smiles).unsqueeze(0)
-        trunk = self.policy.forward_trunk(fp)
+        trunk = self._encode_smiles([smiles])
         tmpl_logits = self.policy.template_logits(trunk)
         value = float(self.policy.value(trunk).item())
 
@@ -533,7 +726,7 @@ class BiPPO:
         state_r2_mask = self._r2_mask_per_state(smiles, valid_t)
         if not bool(state_r2_mask.any()):
             return self._stop_return(value, tmpl_mask)
-        r2_logits = self.policy.r2_logits(trunk, None)[0]
+        r2_logits = self.policy.r2_logits(trunk, None, r2_keys=self._active_r2_keys)[0]
         masked_r2_logits = r2_logits.masked_fill(~state_r2_mask, -1e9)
         r2_dist = torch.distributions.Categorical(logits=masked_r2_logits)
 
@@ -689,6 +882,13 @@ class BiPPO:
         steps_taken = 0
 
         with torch.no_grad():
+            # Cache r2_keys for the entire rollout. Policy weights are frozen
+            # during rollout (PPO updates happen after), so r2_keys is constant
+            # and computing it once amortises the encoder forward over n_steps.
+            # In lookup mode this is just a view onto ``r2_embed.weight``.
+            self._active_r2_keys = self._compute_active_r2_keys(
+                pool="train", with_grad=False
+            )
             while steps_taken < n_steps:
                 current = self._current_smiles
                 react_steps = self._current_react_steps
@@ -787,9 +987,12 @@ class BiPPO:
         last_value = 0.0
         if transitions and not transitions[-1].done:
             with torch.no_grad():
-                fp = self._fp(self._current_smiles).unsqueeze(0)
-                trunk = self.policy.forward_trunk(fp)
+                trunk = self._encode_smiles([self._current_smiles])
                 last_value = float(self.policy.value(trunk).item())
+        # Drop the cached keys so a stale tensor doesn't accidentally survive
+        # into the next phase (PPO update recomputes per-minibatch, eval
+        # recomputes once at the start of evaluate()).
+        self._active_r2_keys = None
         return transitions, last_value
 
     def _end_episode(
@@ -867,10 +1070,7 @@ class BiPPO:
         are reused verbatim so the update sees the same distribution that the
         old log-probs were taken under.
         """
-        fps = torch.from_numpy(
-            np.stack([morgan_fp_array(s) for s in smiles_batch], axis=0)
-        ).to(self.device)
-        trunk = self.policy.forward_trunk(fps)
+        trunk = self._encode_smiles(smiles_batch)
         tmpl_logits = self.policy.template_logits(trunk)
         values = self.policy.value(trunk)
 
@@ -879,11 +1079,16 @@ class BiPPO:
         log_pi_t = tmpl_dist.log_prob(t_actions)
 
         # R2 component: zero contribution for STOP rows, otherwise log π(R2|...).
+        # The PPO update always runs on transitions collected from the train
+        # pool, so r2_keys are re-encoded WITH gradients (encoder mode) or
+        # read straight from r2_embed.weight (lookup mode) — see
+        # :meth:`_compute_active_r2_keys`.
+        r2_keys = self._compute_active_r2_keys(pool="train", with_grad=True)
         if self.policy_arch == "hierarchical":
             safe_t = torch.where(is_stop, torch.zeros_like(t_actions), t_actions)
-            r2_logits = self.policy.r2_logits(trunk, safe_t)
+            r2_logits = self.policy.r2_logits(trunk, safe_t, r2_keys=r2_keys)
         else:
-            r2_logits = self.policy.r2_logits(trunk, None)
+            r2_logits = self.policy.r2_logits(trunk, None, r2_keys=r2_keys)
         r2_logits = r2_logits.masked_fill(~r2_masks.to(self.device), -1e9)
         r2_dist = torch.distributions.Categorical(logits=r2_logits)
         safe_r2 = torch.where(r2_actions < 0, torch.zeros_like(r2_actions), r2_actions)
@@ -1050,12 +1255,28 @@ class BiPPO:
         deltas: list[float] = []
         lengths: list[int] = []
         max_qeds: list[float] = []
-        for s in self.sampler.eval_starts():
-            r, d, l, mq = self._greedy_trajectory(s)
-            rewards.append(r)
-            deltas.append(d)
-            lengths.append(l)
-            max_qeds.append(mq)
+        # Swap the active pool to the eval pool (no-op in lookup mode — same
+        # train pool — but a real swap to the disjoint test pool in encoder
+        # mode). The cached r2_keys is computed once for the eval sweep; like
+        # the rollout cache, this amortises the encoder forward over all test
+        # starts. The try/finally guarantees we restore the train pool even
+        # if a trajectory raises.
+        self._swap_active_pool(self._eval_pool_role)
+        prev_active_keys = self._active_r2_keys
+        try:
+            with torch.no_grad():
+                self._active_r2_keys = self._compute_active_r2_keys(
+                    pool=self._eval_pool_role, with_grad=False
+                )
+            for s in self.sampler.eval_starts():
+                r, d, l, mq = self._greedy_trajectory(s)
+                rewards.append(r)
+                deltas.append(d)
+                lengths.append(l)
+                max_qeds.append(mq)
+        finally:
+            self._swap_active_pool("train")
+            self._active_r2_keys = prev_active_keys
         if not rewards:
             return {
                 "eval/mean_reward": 0.0,
@@ -1091,16 +1312,21 @@ class BiPPO:
 # ----------------------------------------------------------------------
 
 
-def train(config: dict, experiment_name: str) -> None:
-    trainer = BiPPO(config)
-    run = init_wandb(config, "ppo_bi", experiment_name)
+def run_training_loop(trainer: BiPPO, run, config: dict, experiment_name: str) -> None:
+    """Shared PPO training loop used by both BiPPO and its graph-aware subclass.
 
+    The loop is encoder-agnostic; ``trainer`` only needs to expose
+    ``collect_rollout``, ``compute_gae``, ``ppo_update``, ``evaluate``, and
+    ``save`` plus the cumulative-counter attributes referenced below. The
+    extracted helper is so ``GraphTransBiPPO`` can reuse the exact same
+    rollout / eval / checkpoint cadence as the fingerprint trainer without
+    having to copy-paste the body.
+    """
     training_cfg = config.get("training", {})
-    method_cfg = config.get("ppo_bi", config.get("ppo", {}))
     total_timesteps = int(training_cfg.get("total_timesteps", 1_000_000))
     eval_freq = int(training_cfg.get("eval_freq", 10_000))
     save_freq = int(training_cfg.get("save_freq", 100_000))
-    n_steps = int(method_cfg.get("n_steps", training_cfg.get("n_steps", 2048)))
+    n_steps = trainer.n_steps
 
     out_dir = run_dir(run.id if run is not None else experiment_name)
     best_eval = -float("inf")
@@ -1151,4 +1377,10 @@ def train(config: dict, experiment_name: str) -> None:
         run.finish()
 
 
-__all__ = ["BiPPO", "train"]
+def train(config: dict, experiment_name: str) -> None:
+    trainer = BiPPO(config)
+    run = init_wandb(config, "ppo_bi", experiment_name)
+    run_training_loop(trainer, run, config, experiment_name)
+
+
+__all__ = ["BiPPO", "train", "run_training_loop"]

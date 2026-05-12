@@ -1,0 +1,38 @@
+project: GenMolRL_Bi
+experiment_name: RandomSearch_Bi
+reaction_mode: bi
+# r2_available is the right mask for a "random valid action" baseline on
+# bi: T must have R1 pattern match AND ≥1 pattern-matched R2 in the pool
+# (so the template's R2 axis is non-empty). RDKit sanitisation failures
+# on the sampled (T, R2) surface as a -1 reward and terminate the
+# trajectory — identical to the env contract bi-PPO sees under
+# r2_available, so the baseline is directly comparable.
+masking: r2_available
+reward: delta_qed
+max_episode_len: 5
+dataset:
+  # Same convention as configs/exhausted_search_bi_delta_qed.yaml: the
+  # search uses `test_file` as both the start-molecule list and the R2
+  # pool. Switch to `data/Bi/reactants_train.pkl` if you want to mirror
+  # the bi-PPO eval-time R2 pool (~116k entries) at the cost of a much
+  # slower r2_available mask construction.
+  test_file: data/Bi/reactants_test.pkl
+  templates_file: data/Bi/templates.pkl
+env:
+  invalid_reaction_penalty: -1.0
+  reward_round_digits: 3
+  info_qed_round_digits: 3
+training:
+  seed: 42
+search:
+  # No path / reaction caps: the user spec is "every test molecule gets
+  # exactly one random trajectory of up to 5 steps", so the natural cap
+  # is the size of the test pool (one path per start). The runner only
+  # walks the test pool once for random_search.
+  max_paths: null
+  max_attempts: null
+  max_reactions: null
+  max_starts: null
+  results_file: runs/random_search_bi_results.txt
+  overwrite_results: true
+  use_wandb: true

@@ -68,7 +68,7 @@ conda activate "${CONDA_ENV}"
 #! cases where sbatch is invoked from the project root, from
 #! `${PROJECT_ROOT}/run_launcher`, or from the directory holding this
 #! file itself. The last fallback is the hardcoded absolute path.
-LAUNCHER_REL="run_launcher/sh_files/run_genmolrl_td3_continuous.sh"
+LAUNCHER_REL="run_launcher/HPC_sh_files/run_genmolrl_td3_continuous.sh"
 for _cand in "${SLURM_SUBMIT_DIR}" "${SLURM_SUBMIT_DIR}/.." "${SLURM_SUBMIT_DIR}/../.." "${SLURM_SUBMIT_DIR}/../../.." "/home/bz317/rds/hpc-work/GenMolRL/GenMolRL"; do
   if [ -f "${_cand}/${LAUNCHER_REL}" ]; then
     PROJECT_ROOT="$(cd "${_cand}" && pwd)"

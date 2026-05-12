@@ -32,6 +32,10 @@ def _trainer(algorithm: str):
         from genmolrl.methods.ppo_bi_adapter import PPOBiAdapter
 
         train = PPOBiAdapter.train
+    elif algorithm == "graphtransppo_bi":
+        from genmolrl.methods.graphtransppo_bi_adapter import GraphTransPPOBiAdapter
+
+        train = GraphTransPPOBiAdapter.train
     else:
         raise ValueError(f"Unsupported algorithm: {algorithm}")
     return train
@@ -51,6 +55,7 @@ def main() -> None:
             "graphtransrl",
             "graphtransppo",
             "ppo_bi",
+            "graphtransppo_bi",
         ],
         required=True,
     )

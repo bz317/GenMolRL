@@ -3,7 +3,8 @@
 # hierarchical autoregressive policy π(T) · π(R2 | s, T). The R2 head reads
 # a learned per-template embedding, and the R2 mask is per-(state, T).
 # All hyperparameters come from the YAML config below.
-# Pair: run_genmolrl_ppo_bi_multidiscrete.sh (SB3 MaskablePPO MultiDiscrete).
+# Pair: run_genmolrl_ppo_bi_multidiscrete.sh (independent MultiDiscrete via
+# the same hand-rolled BiPPO trainer with policy_arch=multidiscrete).
 source "$(cd "$(dirname "$0")" && pwd)/_launcher_common.sh"
 
 if should_stage_data; then

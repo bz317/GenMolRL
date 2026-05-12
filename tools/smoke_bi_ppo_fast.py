@@ -45,6 +45,11 @@ def make_trainer(policy_arch: str, masking: str, n_steps: int) -> BiPPO:
     config["masking"] = masking
     config.setdefault("ppo_bi", {})
     config["ppo_bi"]["policy_arch"] = policy_arch
+    # Force the legacy lookup R2 head: this smoke test manually subsamples the
+    # reactant pool after trainer construction and rebuilds the policy, which
+    # only makes sense for a fixed nn.Embedding (lookup mode). The encoder
+    # path is covered separately by tools/smoke_r2_arch.py.
+    config["ppo_bi"]["r2_arch"] = "lookup"
     config["ppo_bi"]["r2_resample_retries"] = 32
     config["ppo_bi"]["n_steps"] = n_steps
     config["ppo_bi"]["batch_size"] = 8
