@@ -46,6 +46,11 @@ graphtransppo_bi:
   #     GraphTransformer + projection. Both towers graph-encoded; R2
   #     pool is swappable train ↔ test at eval time.
   r2_arch: encoder_graph
+  # eval_r2_pool: see configs/ppo_bi_hierarchical_delta_qed.yaml for the
+  # full compatibility matrix. Default "test" (strict test-only R2 at
+  # eval). Flip to "train" for apples-to-apples comparison against the
+  # lookup / gr7aa7z6 baseline. Lookup + test → ValueError.
+  eval_r2_pool: test
   # GraphTransformer backbone for R1 (same defaults as graphtransrl /
   # graphtransppo so the R1 trunk stays bit-comparable across the three
   # graph algorithms). Pooled R1 trunk feature dim = 2 * num_emb = 128.

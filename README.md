@@ -730,6 +730,41 @@ How the per-reactant embeddings are produced is controlled by the
   R2s at eval time — which is the only way to get "strict test-only R2
   at evaluation" given the disjoint bi train/test reactant pools.
 
+##### `eval_r2_pool` — which R2 pool to use at evaluation
+
+Independent of `r2_arch`, you can pick which R2 candidate pool the
+policy draws from inside `evaluate()` via the `eval_r2_pool` field on
+the trainer config block (same knob for `ppo_bi` and
+`graphtransppo_bi`):
+
+- `eval_r2_pool: test` — `evaluate()` swaps the active R2 pool to
+  `data/Bi/reactants_test.pkl` (disjoint from the train pool). Strict
+  "test-only R2 at evaluation" — the standard mode for any results
+  that need to be comparable to the bi exhaustive-search and
+  random-search baselines (both of which also use only the test pool
+  for R2 candidates).
+- `eval_r2_pool: train` — `evaluate()` keeps the active R2 pool equal
+  to the training pool. This is the **gr7aa7z6 baseline mode**: the
+  legacy `r2_arch: lookup` runs evaluated against the same train pool
+  the lookup table was learned on. Also legal under `encoder` /
+  `encoder_graph` for apples-to-apples comparison against that
+  baseline (everything fixed except the R2 head).
+
+Compatibility matrix:
+
+| `r2_arch`        | `eval_r2_pool: train` | `eval_r2_pool: test` |
+| ---------------- | --------------------- | -------------------- |
+| `lookup`         | OK (gr7aa7z6)         | **ValueError**       |
+| `encoder`        | OK                    | OK (default)         |
+| `encoder_graph`  | OK                    | OK (default)         |
+
+The `lookup + test` combination is rejected at construction time
+because the `nn.Embedding(num_reactants_train, r2_embed_dim)` table
+has no rows for test reactants. Defaults preserve prior implicit
+behaviour: lookup → `train`, encoder / encoder_graph → `test`. See
+`configs/ppo_bi_hierarchical_lookup_delta_qed.yaml` for the explicit
+gr7aa7z6 reproduction.
+
 ##### R2 encoder capacity (Option 1 upgrade for Bi-PPO)
 
 Under `r2_arch: encoder` the encoder MLP itself has two variants,
@@ -772,7 +807,9 @@ of an MLP over Morgan FPs.
 Three variants, selected by `r2_arch`:
 
 - `lookup`: same legacy `nn.Embedding(num_reactants_train, r2_embed_dim)`
-  table as `ppo_bi.r2_arch: lookup`.
+  table as `ppo_bi.r2_arch: lookup`. Subject to the same `eval_r2_pool`
+  compatibility matrix described in the `ppo_bi.r2_arch` section
+  (lookup + `eval_r2_pool: test` is rejected at construction time).
 - `encoder`: same Morgan-FP MLP encoder as `ppo_bi.r2_arch: encoder`. The
   R1 tower is a GraphTransformer; the R2 tower is an MLP over
   fingerprints — an **asymmetric** two-tower retrieval head.

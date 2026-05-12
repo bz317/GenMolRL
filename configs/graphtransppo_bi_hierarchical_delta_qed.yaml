@@ -62,6 +62,11 @@ graphtransppo_bi:
   #     trunk — no weight tying — so each tower can be sized
   #     independently to balance modelling power against compute.
   r2_arch: encoder_graph
+  # eval_r2_pool: see configs/ppo_bi_hierarchical_delta_qed.yaml for the
+  # full compatibility matrix. Default "test" (strict test-only R2 at
+  # eval). Flip to "train" for apples-to-apples comparison against the
+  # lookup / gr7aa7z6 baseline. Lookup + test → ValueError.
+  eval_r2_pool: test
   # GraphTransformer backbone for R1 (same defaults as graphtransrl /
   # graphtransppo so the R1 trunk is bit-comparable across the three
   # graph algorithms). The pooled R1 trunk feature dim is 2 * num_emb = 128.

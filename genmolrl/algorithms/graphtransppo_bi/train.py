@@ -180,6 +180,12 @@ class GraphTransBiPPO(BiPPO):
         No-op in ``r2_arch in {'lookup', 'encoder'}`` because those archs
         consume ``r2_embed.weight`` / Morgan-FP tensors that the base
         class already initialised.
+
+        When ``_eval_pool_role == "train"`` (i.e. ``eval_r2_pool: train``
+        in the YAML — the apples-to-apples comparison against the
+        lookup / gr7aa7z6 baseline) the two graph batches are identical,
+        so the eval-side cache is just a view onto the train-side cache
+        — no second SMILES-parsing pass.
         """
         if self.r2_arch != "encoder_graph":
             self._train_r2_graphs = None
@@ -188,9 +194,12 @@ class GraphTransBiPPO(BiPPO):
         self._train_r2_graphs = batch_from_smiles(
             self._train_reactant_keys, device=self.device
         )
-        self._eval_r2_graphs = batch_from_smiles(
-            self._eval_reactant_keys, device=self.device
-        )
+        if self._eval_pool_role == "train":
+            self._eval_r2_graphs = self._train_r2_graphs
+        else:
+            self._eval_r2_graphs = batch_from_smiles(
+                self._eval_reactant_keys, device=self.device
+            )
 
     def _r2_pool_data_for(self, pool: str):
         """Return graph Batch under ``encoder_graph``, else delegate to base.

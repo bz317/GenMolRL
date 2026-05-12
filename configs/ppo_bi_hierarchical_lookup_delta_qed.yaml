@@ -1,0 +1,69 @@
+project: GenMolRL_Bi
+experiment_name: PPO_Bi_Hierarchical_Lookup
+reaction_mode: bi
+# r2_available is the default bi-mode masking — pattern-match for T and the
+# per-template R2 pattern-match set. Same setting that gr7aa7z6 used.
+masking: r2_available
+reward: delta_qed
+max_episode_len: 5
+dataset:
+  training_file: data/Bi/reactants_train.pkl
+  test_file: data/Bi/reactants_test.pkl
+  templates_file: data/Bi/templates.pkl
+  start_strategy: random_pool
+env:
+  algorithm_family: ppo_bi_hierarchical
+  use_stop_action: true
+  stop_early_penalty: -0.05
+  stop_penalty_until_step: 3
+  invalid_reaction_penalty: -1.0
+  reward_round_digits: 3
+  info_qed_round_digits: 3
+training:
+  seed: 42
+  total_timesteps: 1000000
+  eval_freq: 10000
+  save_freq: 100000
+ppo_bi:
+  # This YAML reproduces the gr7aa7z6 wandb run (the legacy Bi-PPO baseline
+  # with the strongest measured eval performance: eval/mean_reward ≈ 0.182
+  # at ~900k steps). The two switches that pin the legacy behaviour are:
+  #
+  #   - r2_arch: lookup
+  #       The R2 score head is an ``nn.Embedding(num_reactants_train,
+  #       r2_embed_dim)`` lookup table: one learned vector per R2 SMILES
+  #       in the *training* pool. The table is meaningful ONLY for the
+  #       train pool — there are no rows for test reactants — so this
+  #       arch is incompatible with eval_r2_pool='test' (the trainer
+  #       raises a clear ValueError if you try).
+  #
+  #   - eval_r2_pool: train
+  #       At evaluation time the policy draws R2 from the *training* pool
+  #       (same set the lookup table was trained on). This matches the
+  #       gr7aa7z6 run's "train_R2" tag and the implicit pre-encoder
+  #       default for lookup mode.
+  #
+  # Every other PPO hyperparameter is identical to gr7aa7z6's wandb-logged
+  # config (hierarchical autoregressive policy, n_steps=2048, batch_size=64,
+  # n_epochs=10, gamma=0.99, gae_lambda=0.95, clip_range=0.2, ent_coef=0.01,
+  # vf_coef=0.5, max_grad_norm=0.5, target_kl=0.02, learning_rate=3e-4,
+  # trunk_hidden=256, template_embed_dim=64, r2_embed_dim=64).
+  policy_arch: hierarchical
+  r2_arch: lookup
+  eval_r2_pool: train
+  learning_rate: 0.0003
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: 0.02
+  trunk_hidden: 256
+  template_embed_dim: 64
+  r2_embed_dim: 64
+  r2_resample_retries: 16
+  normalize_advantage: true

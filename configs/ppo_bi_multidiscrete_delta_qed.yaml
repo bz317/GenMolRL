@@ -69,6 +69,11 @@ ppo_bi:
   #     ppo_bi_multidiscrete directly comparable to ppo_bi_hierarchical /
   #     graphtransppo_bi / search baselines at eval time.
   r2_arch: encoder
+  # eval_r2_pool: see configs/ppo_bi_hierarchical_delta_qed.yaml for the
+  # full compatibility matrix. Default "test" (strict test-only R2 at
+  # eval). Flip to "train" for apples-to-apples comparison against the
+  # lookup / gr7aa7z6 baseline. Lookup + test → ValueError.
+  eval_r2_pool: test
   #
   # R2 encoder architecture (Option 1 upgrade — see
   # configs/ppo_bi_hierarchical_delta_qed.yaml for full notes). Defaults

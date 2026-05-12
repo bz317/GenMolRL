@@ -257,11 +257,8 @@ class BiPPO:
 
         # R2 representation. ``lookup`` is the legacy fixed-pool
         # ``nn.Embedding`` (bit-identical to the original BiPolicy). ``encoder``
-        # is a Morgan-FP MLP shared between train and eval, so the R2 pool can
-        # be swapped at evaluation time (train pool during rollout / update;
-        # test pool during evaluate()). This is the only way to satisfy
-        # "evaluate using only test molecules for R2" because the bi train and
-        # test reactant pools are completely disjoint in this dataset.
+        # is a Morgan-FP MLP shared between train and eval. ``encoder_graph``
+        # (in GraphTransBiPPO) is a Siamese R2 GraphTransformer + projection.
         #
         # Subclasses may extend ``_supported_r2_archs`` to add new values
         # (e.g. ``GraphTransBiPPO`` adds ``'encoder_graph'`` for the Siamese
@@ -275,13 +272,50 @@ class BiPPO:
                 f"r2_arch must be one of {sorted(supported_archs)}, "
                 f"got {self.r2_arch!r}"
             )
-        # ``lookup`` is the only setting where the eval-time R2 pool is FORCED
-        # to be the training pool (because the nn.Embedding rows are baked at
-        # training time and the indices don't exist for any other pool). Every
-        # other r2_arch (encoder, encoder_graph, ...) uses a learned encoder
-        # whose parameters are shared across pools, so evaluate() swaps the
-        # active pool to ``_eval_reaction_manager`` (= test pool).
-        self._eval_pool_role = "train" if self.r2_arch == "lookup" else "eval"
+
+        # ``eval_r2_pool`` chooses which R2 pool the policy draws from
+        # during evaluate() — either the training pool ("train") or the
+        # test pool ("test"). Compatibility matrix:
+        #
+        #   r2_arch=lookup        + eval_r2_pool=train → OK (gr7aa7z6 baseline).
+        #   r2_arch=lookup        + eval_r2_pool=test  → ERROR (no test rows).
+        #   r2_arch=encoder       + eval_r2_pool=train → OK (FP encoder on train pool).
+        #   r2_arch=encoder       + eval_r2_pool=test  → OK (current encoder default).
+        #   r2_arch=encoder_graph + eval_r2_pool=train → OK (graph encoder on train pool).
+        #   r2_arch=encoder_graph + eval_r2_pool=test  → OK (current encoder_graph default).
+        #
+        # If unset, the default preserves prior implicit behaviour:
+        # lookup → train, every other arch → test. Internally we map the
+        # YAML "train"/"test" to the legacy role names "train"/"eval" so
+        # ``_swap_active_pool`` and ``_compute_active_r2_keys`` keep their
+        # existing call sites — only the binding changes.
+        _default_eval_pool = "train" if self.r2_arch == "lookup" else "test"
+        _eval_pool_yaml = str(
+            method_cfg.get("eval_r2_pool", _default_eval_pool)
+        ).lower()
+        _yaml_to_internal = {"train": "train", "test": "eval", "eval": "eval"}
+        if _eval_pool_yaml not in _yaml_to_internal:
+            raise ValueError(
+                "eval_r2_pool must be 'train' or 'test', got "
+                f"{_eval_pool_yaml!r}"
+            )
+        self._eval_pool_role = _yaml_to_internal[_eval_pool_yaml]
+        # Public, YAML-style spelling for logging / experiment tags.
+        self.eval_r2_pool = "train" if self._eval_pool_role == "train" else "test"
+
+        # lookup + test is structurally impossible — the embedding table is
+        # sized to the training pool and has no rows for test reactants.
+        # Fail loudly at construction time rather than silently index into
+        # the wrong row at eval.
+        if self.r2_arch == "lookup" and self._eval_pool_role == "eval":
+            raise ValueError(
+                "r2_arch='lookup' is incompatible with eval_r2_pool='test': "
+                "the nn.Embedding(num_reactants, r2_embed_dim) table is sized "
+                "to the TRAINING pool — there are no rows for test reactants. "
+                "Use r2_arch='encoder' or r2_arch='encoder_graph' to evaluate "
+                "on test R2s, or set eval_r2_pool='train' to keep the legacy "
+                "(gr7aa7z6) behaviour where eval draws R2 from the train pool."
+            )
 
         # Derive the R2-axis mask source from the masking mode (the README
         # contract). reaction_valid → RDKit-validated set (zero -1 guarantee);
@@ -321,13 +355,26 @@ class BiPPO:
             eps=float(method_cfg.get("adam_eps", 1e-5)),
         )
 
-        # Build the eval-pool reaction manager from the test reactants. Only
-        # needed when ``r2_arch != 'lookup'`` (lookup forces eval to share the
-        # train pool because the embedding indices are baked in). Subclasses
-        # may extend this with their own pool-specific caches — see
-        # ``GraphTransBiPPO._init_extra_pool_data`` for the graph-batch
-        # variant under r2_arch='encoder_graph'.
-        if self.r2_arch != "lookup":
+        # Build the eval-pool reaction manager. Source depends on the
+        # ``eval_r2_pool`` knob (NOT on ``r2_arch``):
+        #
+        #   - ``_eval_pool_role == "train"``: eval shares the train pool.
+        #     Aliases the eval-pool attributes at the train pool objects;
+        #     ``_swap_active_pool('eval')`` is then a structural no-op. This
+        #     is the gr7aa7z6 baseline under lookup, and also a legal
+        #     "evaluate on the same pool you trained on" mode under encoder
+        #     / encoder_graph for apples-to-apples comparison against
+        #     lookup.
+        #
+        #   - ``_eval_pool_role == "eval"``: build a separate
+        #     ``ReactionManager`` from ``data/Bi/reactants_test.pkl``. Only
+        #     legal when ``r2_arch != 'lookup'`` (the lookup-table guard
+        #     above already rules this combination out).
+        if self._eval_pool_role == "train":
+            self._eval_reaction_manager = self._train_reaction_manager
+            self._eval_reactant_keys = self._train_reactant_keys
+            self._eval_num_reactants = self._train_num_reactants
+        else:
             test_manager_source = (
                 self.test_reactants
                 if isinstance(self.test_reactants, dict)
@@ -348,32 +395,29 @@ class BiPPO:
                 self._eval_reaction_manager.reactants.keys()
             )
             self._eval_num_reactants = len(self._eval_reactant_keys)
-        else:
-            # lookup mode: eval shares the train pool (same managers / keys).
-            # Pointing the eval-pool attributes at the train pool keeps
-            # ``_swap_active_pool('eval')`` a no-op for backward compatibility.
-            self._eval_reaction_manager = self._train_reaction_manager
-            self._eval_reactant_keys = self._train_reactant_keys
-            self._eval_num_reactants = self._train_num_reactants
 
         # Pre-compute Morgan fingerprints for both pools as torch tensors,
         # used by ``r2_arch='encoder'``. These feed the R2 encoder MLP at
         # every sampling / update call; building them once at init avoids
-        # per-step morgan_fp overhead. Subclasses can override
-        # ``_init_extra_pool_data`` to add their own pool caches (e.g.
-        # GraphTransBiPPO builds torch_geometric Batches for
-        # ``r2_arch='encoder_graph'``); FP caches are still useful even when
-        # the active arch doesn't use them because we keep the fingerprint
-        # cost in one place.
+        # per-step morgan_fp overhead.
+        #
+        # When ``_eval_pool_role == "train"`` the two pools are identical,
+        # so the eval-side cache is just a view onto the train-side cache.
+        # When ``_eval_pool_role == "eval"`` we build a separate test-pool
+        # FP tensor. Subclasses (e.g. GraphTransBiPPO) extend this with
+        # their own pool-specific caches via ``_init_extra_pool_data``.
         if self.r2_arch == "encoder":
             train_fp_np = np.stack(
                 [morgan_fp_array(s) for s in self._train_reactant_keys], axis=0
             )
-            test_fp_np = np.stack(
-                [morgan_fp_array(s) for s in self._eval_reactant_keys], axis=0
-            )
             self._train_r2_fps = torch.from_numpy(train_fp_np).float().to(self.device)
-            self._eval_r2_fps = torch.from_numpy(test_fp_np).float().to(self.device)
+            if self._eval_pool_role == "train":
+                self._eval_r2_fps = self._train_r2_fps
+            else:
+                test_fp_np = np.stack(
+                    [morgan_fp_array(s) for s in self._eval_reactant_keys], axis=0
+                )
+                self._eval_r2_fps = torch.from_numpy(test_fp_np).float().to(self.device)
         else:
             self._train_r2_fps = None
             self._eval_r2_fps = None

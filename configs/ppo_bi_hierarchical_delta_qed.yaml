@@ -75,6 +75,24 @@ ppo_bi:
   #     fingerprints through a small MLP) to flow gradients into the encoder.
   r2_arch: encoder
   #
+  # eval_r2_pool chooses which R2 pool the policy draws from during
+  # evaluate(): "train" (same pool used at rollout / update) or "test"
+  # (the disjoint test reactant pool). Compatibility matrix:
+  #
+  #   r2_arch=lookup       + eval_r2_pool=train → OK  (gr7aa7z6 baseline,
+  #                                                   see configs/ppo_bi_hierarchical_lookup_delta_qed.yaml).
+  #   r2_arch=lookup       + eval_r2_pool=test  → ERROR (no test rows in
+  #                                                   the lookup table).
+  #   r2_arch=encoder      + eval_r2_pool={train,test} → OK (FP encoder).
+  #   r2_arch=encoder_graph+ eval_r2_pool={train,test} → OK (graph encoder,
+  #                                                   only in graphtransppo_bi).
+  #
+  # Default for encoder / encoder_graph is "test" (strict test-only R2 at
+  # eval, since the bi train/test reactant pools are disjoint here). Flip
+  # to "train" for an apples-to-apples comparison against the gr7aa7z6
+  # lookup baseline that holds everything fixed except the R2 head.
+  eval_r2_pool: test
+  #
   # R2 encoder architecture (Option 1 upgrade for Bi-PPO).
   #
   # Two MLP variants share the ``r2_arch='encoder'`` branch:
