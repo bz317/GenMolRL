@@ -15,9 +15,12 @@ environment / masking / staging stack:
 
 - **GraphTransPPO** — graph-transformer backbone with PPO (clipped surrogate
   + value baseline) instead of the GraphTransRL trajectory-balance loss.
-- **Bi-PPO** — two trainers for Bi reaction mode (one `MultiDiscrete([T, R2])`
-  on top of SB3 `MaskablePPO`, one hand-rolled hierarchical / multidiscrete
-  trainer).
+- **Bi-PPO** — two trainers for Bi reaction mode. The SB3 `MaskablePPO`
+  variant uses `MultiDiscrete([T, R2])` with independent
+  `π(T | R1) · π(R2 | R1)` heads. The hand-rolled variant supports either
+  the independent parameterisation above or the autoregressive
+  `π(T | R1) · π(R2 | R1, T)` (template-conditional R2), selectable via
+  `ppo_bi.policy_arch`.
 - Future methods such as REINVENT scaffold decorator slot in via the same
   `genmolrl/methods` adapter pattern.
 
@@ -190,7 +193,7 @@ Use the wrapper scripts from the project root (`<repo>/GenMolRL`):
 ./run_launcher/sh_files/run_genmolrl_graphtransrl.sh             # uni GraphTransRL (trajectory balance)
 ./run_launcher/sh_files/run_genmolrl_graphtransppo.sh            # uni GraphTransPPO (PPO over the graph backbone)
 ./run_launcher/sh_files/run_genmolrl_ppo_bi_multidiscrete.sh     # bi PPO, SB3 MaskablePPO + MultiDiscrete([T+1, R2])
-./run_launcher/sh_files/run_genmolrl_ppo_bi_hierarchical.sh      # bi PPO, hand-rolled trainer with π(T)·π(R2|s,T)
+./run_launcher/sh_files/run_genmolrl_ppo_bi_hierarchical.sh      # bi PPO, hand-rolled trainer with π(T|R1)·π(R2|R1,T)
 ./run_launcher/sh_files/run_genmolrl_random_search.sh
 ./run_launcher/sh_files/run_genmolrl_greedy_search.sh
 ./run_launcher/sh_files/run_genmolrl_exhausted.sh          # uni exhaustive enumeration
@@ -480,14 +483,22 @@ Two trainers / launchers exist for Bi reaction mode:
 2. **`run_genmolrl_ppo_bi_hierarchical.sh`** →
    `--algorithm ppo_bi` + config `configs/ppo_bi_hierarchical_delta_qed.yaml`.
    Hand-rolled PPO trainer that supports two policy architectures via the
-   `ppo_bi.policy_arch` field:
-   - `hierarchical` (default): `π(T, R2 | s) = π_T(T | s) · π_R2(R2 | s, T)`.
-     The R2 head is conditioned on the sampled template via a learned per-T
-     embedding; the R2 mask is per-(state, T).
+   `ppo_bi.policy_arch` field. In both architectures the only state input
+   is the Morgan fingerprint of the current molecule — i.e. `R1` for the
+   next bi-reaction step. Equivalently, `s := fp(R1)` and `π(... | s)` and
+   `π(... | R1)` refer to the same distribution.
+   - `hierarchical` (default):
+     `π(T, R2 | R1) = π_T(T | R1) · π_R2(R2 | R1, T)`.
+     The R2 query MLP consumes the concatenation of the shared trunk
+     features (encoding `R1`) and a learned per-template embedding of `T`,
+     then dot-products against per-reactant embeddings — so R2 logits are
+     a function of **both R1 and T**. The R2 mask is per-`(R1, T)`.
    - `multidiscrete`: matches the SB3 parameterisation but lives in the
-     same hand-rolled trainer (`π(T) · π(R2)`, R2 mask is the per-state
-     union over valid templates). Useful as a within-trainer ablation
-     against the autoregressive default.
+     same hand-rolled trainer:
+     `π(T, R2 | R1) = π_T(T | R1) · π_R2(R2 | R1)`. The R2 query depends
+     on `R1` only; `T` is dropped from the R2 head. The R2 mask is the
+     per-`R1` union over valid templates. Useful as a within-trainer
+     ablation against the autoregressive default.
 
 Masking semantics follow the README contract (see *Masking Modes*
 below). Both launchers default to `masking=r2_available` for
@@ -620,18 +631,26 @@ Uses all available templates:
 - `unimolecular_explicit_reagent`
 - `bimolecular`
 
-For PPO/A2C, Bi has two action parameterisations:
+For PPO/A2C, Bi has two action parameterisations. The single state input
+in every case is the Morgan fingerprint of the current molecule, which is
+`R1` for the next bi-reaction; below we write the conditioning on `R1`
+directly to keep things unambiguous.
 
-1. **`MultiDiscrete([T, R2])`** (default for `--algorithm ppo` +
-   `algorithm_family: sb3_multidiscrete`). Template `T` and second
-   reactant `R2` are separate categorical action heads, sampled
-   independently. The R2 choice is not conditioned on the sampled template
-   inside the policy distribution.
+1. **`MultiDiscrete([T, R2])`** — `π(T | R1) · π(R2 | R1)` (default for
+   `--algorithm ppo` + `algorithm_family: sb3_multidiscrete`). Template
+   `T` and second reactant `R2` are separate categorical action heads
+   sampled independently. **The R2 head does not see `T`** — both heads
+   consume the shared trunk over `fp(R1)`, then T- and R2-axis masks are
+   applied independently.
 
-2. **Hierarchical `π(T) · π(R2 | T)`** (`--algorithm ppo_bi` +
-   `ppo_bi.policy_arch: hierarchical`). The R2 head reads a learned
-   per-template embedding, so it can express template-conditional R2
-   preferences. The R2 mask is per-`(state, T)` rather than per-state.
+2. **Hierarchical `π(T | R1) · π(R2 | R1, T)`** (`--algorithm ppo_bi` +
+   `ppo_bi.policy_arch: hierarchical`). The R2 head **does** see `T`: the
+   trunk feature for `R1` is concatenated with a learned per-template
+   embedding of `T` and passed through the R2 query MLP, which then
+   dot-products against per-reactant embeddings to produce the R2 logits.
+   The R2 mask is per-`(R1, T)` rather than per-`R1`. So the policy can
+   express template-conditional R2 preferences and the R2 distribution
+   shifts with `T`.
 
 The same `ppo_bi` trainer also exposes `policy_arch: multidiscrete`,
 which matches parameterisation (1) but lives in the hand-rolled trainer
@@ -678,11 +697,19 @@ Used by the hand-rolled BiPPO trainer (`--algorithm ppo_bi`). The trainer
 `stop_early_penalty`, `stop_penalty_until_step`, `reward_round_digits`,
 `info_qed_round_digits`) and operates over the same SMILES action triple
 `(state, T, R2)` as `MoleculeDesignEnv`, but the policy emits the joint
-`(T, R2)` directly. Two architectures are supported via
-`ppo_bi.policy_arch`:
+`(T, R2)` directly. State conditioning is exactly `s = fp(R1)` (1024-d
+Morgan fingerprint of the current molecule, which becomes R1 of the next
+reaction). Two architectures are supported via `ppo_bi.policy_arch`:
 
-- `hierarchical`: autoregressive `π_T(T | s) · π_R2(R2 | s, T)`.
-- `multidiscrete`: independent `π_T(T | s) · π_R2(R2 | s)`.
+- `hierarchical`: autoregressive `π_T(T | R1) · π_R2(R2 | R1, T)`. The
+  R2 query is built from the trunk encoding of `R1` concatenated with a
+  learned per-template embedding of `T` (`template_embed_dim=64` by
+  default), then projected to a `r2_embed_dim=64` query that
+  dot-products against per-reactant embeddings. So the R2 logits are a
+  function of **both R1 and T**.
+- `multidiscrete`: independent `π_T(T | R1) · π_R2(R2 | R1)`. The R2
+  query consumes only the trunk encoding of `R1`; `T` is dropped from
+  the R2 head.
 
 ### `graphtransppo`
 
