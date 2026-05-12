@@ -69,7 +69,16 @@ ppo_bi:
   #     ppo_bi_multidiscrete directly comparable to ppo_bi_hierarchical /
   #     graphtransppo_bi / search baselines at eval time.
   r2_arch: encoder
-  # r2_encoder_hidden: 512  # defaults to obs_dim // 2 = 512 in encoder mode
+  #
+  # R2 encoder architecture (Option 1 upgrade — see
+  # configs/ppo_bi_hierarchical_delta_qed.yaml for full notes). Defaults
+  # mirror the hierarchical config so the only axis of comparison between
+  # the two policy parameterisations stays the policy factorisation
+  # (T-conditional vs independent), not the R2 encoder capacity.
+  r2_encoder_residual: true
+  r2_encoder_hidden: 1024
+  r2_encoder_n_res_blocks: 2
+  # r2_encoder_n_layers: 2  # used only when r2_encoder_residual=false
   # r2_mask_kind is derived from `masking` automatically:
   #   reaction_valid -> true_valid  (zero -1)
   #   substructure / r2_available -> pattern  (-1 allowed)

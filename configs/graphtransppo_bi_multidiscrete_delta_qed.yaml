@@ -38,19 +38,28 @@ graphtransppo_bi:
   # ablation against the hierarchical variant — the R2 distribution will
   # be shared across templates, which is generally too coarse.
   policy_arch: multidiscrete
-  # r2_arch controls the R2 representation (see ppo_bi YAMLs for full notes):
-  #   - 'lookup' (legacy): fixed nn.Embedding for the train R2 pool; eval
-  #     forced to draw R2 from the same train pool.
-  #   - 'encoder' (default): R2 keys = MLP(morgan_fp(R2_SMILES)). Shared
-  #     between train and test pools, so evaluate() can swap to
-  #     data/Bi/reactants_test.pkl and the policy only ever picks R2 from
-  #     test molecules at eval time. Required because the bi train/test
-  #     reactant pools in this dataset are completely disjoint.
-  r2_arch: encoder
-  # r2_encoder_hidden: 512  # defaults to r2_fp_dim // 2 in encoder mode
+  # r2_arch controls the R2 representation (see the hierarchical YAML for
+  # the full encoder_graph rationale):
+  #   - 'lookup' (legacy): fixed nn.Embedding for the train R2 pool.
+  #   - 'encoder': MLP(morgan_fp(R2_SMILES)) — asymmetric two-tower.
+  #   - 'encoder_graph' (Option 3, current default): Siamese R2
+  #     GraphTransformer + projection. Both towers graph-encoded; R2
+  #     pool is swappable train ↔ test at eval time.
+  r2_arch: encoder_graph
+  # GraphTransformer backbone for R1 (same defaults as graphtransrl /
+  # graphtransppo so the R1 trunk stays bit-comparable across the three
+  # graph algorithms). Pooled R1 trunk feature dim = 2 * num_emb = 128.
   num_emb: 64
   num_layers: 3
   num_heads: 2
+  # GraphTransformer backbone for R2 (Option 3) — intentionally smaller
+  # than R1 because the R2 pool is re-encoded over ~116k candidate
+  # graphs every refresh. See the hierarchical YAML for the cost /
+  # gradient-density trade-off behind these defaults.
+  r2_num_emb: 32
+  r2_num_layers: 1
+  r2_num_heads: 2
+  r2_keys_refresh_minibatches: 8
   learning_rate: 0.0003
   n_steps: 2048
   batch_size: 64

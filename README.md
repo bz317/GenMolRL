@@ -711,14 +711,99 @@ reaction). Two architectures are supported via `ppo_bi.policy_arch`:
   query consumes only the trunk encoding of `R1`; `T` is dropped from
   the R2 head.
 
+#### `ppo_bi.r2_arch` — R2 representation
+
+How the per-reactant embeddings are produced is controlled by the
+`r2_arch` field on the trainer config block (same knob for both
+`policy_arch` values):
+
+- `lookup` (legacy): a learned `nn.Embedding(num_reactants_train,
+  r2_embed_dim)` table. The R2 vocabulary is **baked at training
+  time**; the embedding rows have no meaningful values for any other
+  pool, so `evaluate()` is forced to draw R2 from the same train pool.
+  Bit-identical to the original Bi-PPO runs.
+- `encoder` (current default in `configs/ppo_bi_*.yaml`): an MLP
+  encoder over Morgan fingerprints of the candidate R2 SMILES,
+  `r2_keys = MLP_R2(fp(R2_SMILES))`. The encoder weights are shared
+  between train and test pools, so `evaluate()` can swap the active R2
+  pool to `data/Bi/reactants_test.pkl` and the policy never sees train
+  R2s at eval time — which is the only way to get "strict test-only R2
+  at evaluation" given the disjoint bi train/test reactant pools.
+
+##### R2 encoder capacity (Option 1 upgrade for Bi-PPO)
+
+Under `r2_arch: encoder` the encoder MLP itself has two variants,
+selected by `r2_encoder_residual`:
+
+- `r2_encoder_residual: false` (legacy): a plain 2-layer MLP
+  `1024 → r2_encoder_hidden → r2_embed_dim`. ~558k parameters at
+  the default `r2_encoder_hidden=512`.
+- `r2_encoder_residual: true` (current default in
+  `configs/ppo_bi_*.yaml`): a deeper Pre-LN residual MLP. Layout:
+  `Linear(1024 → r2_encoder_hidden) → LayerNorm → ReLU` for the
+  stem, then `r2_encoder_n_res_blocks` residual blocks (each
+  `LayerNorm → Linear → ReLU → Linear → +skip`) at width
+  `r2_encoder_hidden`, then a `Linear(r2_encoder_hidden →
+  r2_embed_dim)` projection. With the defaults
+  `r2_encoder_hidden: 1024` and `r2_encoder_n_res_blocks: 2` that's
+  ~5.3M parameters — roughly 10× the legacy encoder, but the
+  LayerNorm + skip backbone keeps the deeper stack stable under PPO
+  advantage noise. Use this variant unless you're trying to
+  reproduce an older Bi-PPO baseline.
+
 ### `graphtransppo`
 
 Used by GraphTransPPO (`--algorithm graphtransppo`). Action space is
 `Discrete(num_templates + 1)` like `sb3_discrete`, but the env builds a
 PyG graph observation (`reaction_graph_action` design) so the policy and
 value heads can be applied on the graph-transformer trunk directly. Bi
-support would require a joint `(T, R2)` readout on top of the graph
-encoder and is not currently implemented.
+support is provided separately by `graphtransppo_bi` (below).
+
+### `graphtransppo_bi`
+
+Used by Bi-GraphTransPPO (`--algorithm graphtransppo_bi`). Same hand-rolled
+trainer family as `ppo_bi` — supports both `policy_arch: hierarchical` and
+`policy_arch: multidiscrete` with identical PPO accounting — but the R1
+trunk is replaced by a GraphTransformer over the molecular graph instead
+of an MLP over Morgan FPs.
+
+#### `graphtransppo_bi.r2_arch` — R2 representation
+
+Three variants, selected by `r2_arch`:
+
+- `lookup`: same legacy `nn.Embedding(num_reactants_train, r2_embed_dim)`
+  table as `ppo_bi.r2_arch: lookup`.
+- `encoder`: same Morgan-FP MLP encoder as `ppo_bi.r2_arch: encoder`. The
+  R1 tower is a GraphTransformer; the R2 tower is an MLP over
+  fingerprints — an **asymmetric** two-tower retrieval head.
+- `encoder_graph` (current default, Option 3 upgrade): a **Siamese**
+  R2 GraphTransformer + linear projection. Both towers are
+  graph-encoded; the R2 input is the molecular graph itself, not a
+  fingerprint. The R2 backbone has **separate weights** from the R1
+  backbone — no weight tying — so each tower can be sized
+  independently:
+
+  - R1 backbone: full GraphTransformer (`num_emb: 64`, `num_layers:
+    3`, `num_heads: 2`) — the trunk shared by template / value /
+    R2-query heads.
+  - R2 backbone: smaller GraphTransformer (`r2_num_emb: 32`,
+    `r2_num_layers: 1`, `r2_num_heads: 2` by default) followed by a
+    `Linear(2 * r2_num_emb → r2_embed_dim)` projection. The R2 pool
+    is re-encoded over ~116k candidate graphs during each PPO update,
+    so the R2 side is intentionally smaller to keep wall-clock cost
+    manageable.
+
+  Because the Siamese R2 encoder is expensive per call, the trainer
+  caches its output with an explicit refresh cadence:
+  `r2_keys_refresh_minibatches` (default `8`). On the first PPO
+  minibatch of each update cycle (and every K minibatches thereafter)
+  the R2 pool is re-encoded *with gradients*; on intermediate
+  minibatches the trainer reuses a detached copy of the previous
+  fresh encoding. The R1 trunk, template head, value head, and R2
+  query head still get gradient every minibatch — only the Siamese
+  R2 backbone's gradient signal is downsampled. Set
+  `r2_keys_refresh_minibatches: 1` to recover per-minibatch R2
+  gradients at the cost of ~K× more pool encodings per update.
 
 ### `td3_pgfs`
 

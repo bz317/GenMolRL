@@ -9,7 +9,7 @@ the current molecule R1 changes, from a 1024-d Morgan fingerprint passed
 through an MLP to the molecular graph passed through a
 ``GraphTransformer``.
 
-The R2 side supports the same two architectures as ``BiPolicy``:
+The R2 side supports three architectures:
 
   - ``r2_arch='lookup'`` (legacy default): a learned
     ``nn.Embedding(num_reactants, r2_embed_dim)`` lookup table. The R2
@@ -18,9 +18,19 @@ The R2 side supports the same two architectures as ``BiPolicy``:
   - ``r2_arch='encoder'``: a Morgan-FP MLP encoder shared between train
     and eval, so the trainer can swap the active R2 pool (train ↔ test)
     between rollout and evaluation. The R1 side stays graph-based; only
-    the R2 side becomes vocabulary-free. This is the standard
-    "two-tower retrieval with a learned encoder" parameterisation
-    applied per modality (R1 = graph, R2 = fingerprint).
+    the R2 side stays fingerprint-based — the asymmetric "two-tower
+    retrieval" variant that ``ppo_bi`` already uses.
+  - ``r2_arch='encoder_graph'`` (Option 3 upgrade, current default in
+    graphtransppo_bi YAMLs): a *Siamese* GraphTransformer over the R2
+    molecular graph followed by a small projection to ``r2_embed_dim``.
+    The R2 backbone is structurally identical to the R1 backbone (same
+    GraphTransformer hyper-parameters can be reused; defaults are
+    tuned smaller to keep the per-step cost manageable). The pool can
+    still be swapped train ↔ test between rollout and eval; what
+    changes is the input modality — instead of a fingerprint tensor
+    we pass a torch_geometric ``Batch`` of R2 graphs. This is the
+    only architecture where BOTH sides of the retrieval head are
+    graph-encoded with learned parameters.
 
 Both ``conditional_r2={True, False}`` are supported via the same flag as
 ``BiPolicy``:
@@ -88,12 +98,26 @@ class GraphTransBiPolicy(nn.Module):
         template_embed_dim: embedding dim for the T-conditioning vector
             consumed by the R2 head; ignored when ``conditional_r2=False``.
         r2_embed_dim: dimension of the R2 query target vectors.
-        r2_arch: ``'lookup'`` (legacy ``nn.Embedding``) or ``'encoder'``
-            (Morgan-FP MLP → r2_embed_dim, vocabulary-free).
+        r2_arch: ``'lookup'`` (legacy ``nn.Embedding``), ``'encoder'``
+            (Morgan-FP MLP → r2_embed_dim, vocabulary-free), or
+            ``'encoder_graph'`` (Siamese R2 GraphTransformer +
+            projection, Option 3 upgrade — current default).
         r2_encoder_hidden: hidden width of the R2 encoder MLP. Only used
             when ``r2_arch='encoder'``; defaults to ``r2_fp_dim // 2``.
         r2_fp_dim: input fingerprint dim for the R2 encoder MLP.
             Defaults to 1024 (Morgan FP length used in ``ppo_bi``).
+            Ignored when ``r2_arch='encoder_graph'``.
+        r2_num_emb: GraphTransformer embedding width for the R2
+            backbone (used only when ``r2_arch='encoder_graph'``).
+            Defaults to a smaller value than the R1 backbone because
+            the R2 pool is encoded per-PPO-minibatch over ~116k
+            candidates — keeping num_emb modest is the single biggest
+            cost lever. The pooled R2 graph-level feature has width
+            ``2 * r2_num_emb``.
+        r2_num_layers: GraphTransformer layer count for the R2 backbone.
+            Same cost trade-off as ``r2_num_emb``.
+        r2_num_heads: GraphTransformer attention head count for the R2
+            backbone.
     """
 
     def __init__(
@@ -110,6 +134,9 @@ class GraphTransBiPolicy(nn.Module):
         r2_arch: str = "lookup",
         r2_encoder_hidden: int | None = None,
         r2_fp_dim: int = 1024,
+        r2_num_emb: int = 32,
+        r2_num_layers: int = 1,
+        r2_num_heads: int = 2,
     ):
         super().__init__()
         self.num_templates = int(num_templates)
@@ -120,9 +147,10 @@ class GraphTransBiPolicy(nn.Module):
         self.r2_embed_dim = int(r2_embed_dim)
 
         self.r2_arch = str(r2_arch).lower()
-        if self.r2_arch not in {"lookup", "encoder"}:
+        if self.r2_arch not in {"lookup", "encoder", "encoder_graph"}:
             raise ValueError(
-                f"r2_arch must be 'lookup' or 'encoder', got {self.r2_arch!r}"
+                f"r2_arch must be 'lookup', 'encoder', or 'encoder_graph', "
+                f"got {self.r2_arch!r}"
             )
 
         spec = GraphFeatureSpec()
@@ -162,11 +190,20 @@ class GraphTransBiPolicy(nn.Module):
                 n_layers=2,
             )
 
+        # R2 encoder: three mutually-exclusive variants matching the three
+        # supported r2_arch values. The same ``encode_r2_pool`` API hides the
+        # variation from the trainer; only the input data type differs (none /
+        # tensor / Batch). Attributes that don't apply to the active arch are
+        # set to None to keep the checkpoint key set obvious.
+        self.r2_embed = None
+        self.r2_encoder = None
+        self.r2_backbone = None
+        self.r2_project = None
+        self.r2_fp_dim = None
+        self.r2_num_emb = None
         if self.r2_arch == "lookup":
             self.r2_embed = nn.Embedding(self.num_reactants, r2_embed_dim)
-            self.r2_encoder = None
-            self.r2_fp_dim = None
-        else:
+        elif self.r2_arch == "encoder":
             self.r2_fp_dim = int(r2_fp_dim)
             r2_hidden = (
                 int(r2_encoder_hidden)
@@ -176,7 +213,27 @@ class GraphTransBiPolicy(nn.Module):
             self.r2_encoder = _mlp(
                 self.r2_fp_dim, r2_hidden, r2_embed_dim, n_layers=2
             )
-            self.r2_embed = None
+        else:
+            # ``encoder_graph``: Siamese R2 GraphTransformer + linear
+            # projection. Same architecture family as the R1 backbone but
+            # with separate weights — there is no obvious gain from tying
+            # them and disentangling lets us shrink the R2 side aggressively
+            # (defaults: 1 layer, num_emb=32) to keep the per-PPO-minibatch
+            # pool-encoding cost manageable. The pooled graph feature has
+            # width ``2 * r2_num_emb`` (atoms via global_mean_pool + the
+            # conditioning virtual node), which is then projected to
+            # ``r2_embed_dim`` so the dot-product head sees the same key
+            # dim regardless of which R2 arch is active.
+            self.r2_num_emb = int(r2_num_emb)
+            self.r2_backbone = GraphTransformer(
+                spec.node_dim,
+                spec.edge_dim,
+                spec.cond_dim,
+                num_emb=self.r2_num_emb,
+                num_layers=int(r2_num_layers),
+                num_heads=int(r2_num_heads),
+            )
+            self.r2_project = nn.Linear(self.r2_num_emb * 2, r2_embed_dim)
 
     # ------------------------------------------------------------------
     # Encoder + heads
@@ -202,22 +259,40 @@ class GraphTransBiPolicy(nn.Module):
     def value(self, trunk_feats: torch.Tensor) -> torch.Tensor:
         return self.value_head(trunk_feats).squeeze(-1)
 
-    def encode_r2_pool(self, r2_fps: torch.Tensor | None) -> torch.Tensor:
+    def encode_r2_pool(self, r2_pool_data) -> torch.Tensor:
         """Return ``r2_keys`` of shape ``(N_pool, r2_embed_dim)`` for the active pool.
 
-        Same semantics as :meth:`BiPolicy.encode_r2_pool`:
-        - ``r2_arch='lookup'``: returns ``self.r2_embed.weight`` (``r2_fps``
-          ignored, table fixed to training pool).
-        - ``r2_arch='encoder'``: applies the R2 MLP to ``r2_fps``; the
-          output is differentiable so PPO updates flow into the encoder.
+        Generalises :meth:`BiPolicy.encode_r2_pool` to three encoder
+        variants — the trainer passes a different ``r2_pool_data`` type
+        for each arch and this method dispatches on ``self.r2_arch``:
+
+        - ``r2_arch='lookup'``: returns ``self.r2_embed.weight``
+          (``r2_pool_data`` ignored, table fixed to training pool).
+        - ``r2_arch='encoder'``: expects ``r2_pool_data`` to be a
+          ``(N_pool, r2_fp_dim)`` Morgan-FP tensor and applies the R2 MLP.
+        - ``r2_arch='encoder_graph'``: expects ``r2_pool_data`` to be a
+          ``torch_geometric.data.Batch`` of R2 molecular graphs, runs the
+          R2 GraphTransformer + linear projection. ``cond`` is an
+          all-ones placeholder matching the R1 convention; could later
+          carry pool-side context (e.g. R2 cluster id) the same way R1
+          could carry episode-step depth.
+
+        The output is differentiable in both encoder modes so PPO
+        gradients flow into the active R2 encoder.
         """
         if self.r2_arch == "lookup":
             return self.r2_embed.weight
-        if r2_fps is None:
+        if r2_pool_data is None:
             raise ValueError(
-                "r2_arch='encoder' requires r2_fps to compute r2_keys"
+                f"r2_arch={self.r2_arch!r} requires r2_pool_data to compute r2_keys"
             )
-        return self.r2_encoder(r2_fps)
+        if self.r2_arch == "encoder":
+            return self.r2_encoder(r2_pool_data)
+        # encoder_graph: r2_pool_data is a torch_geometric Batch of R2 graphs.
+        n_graphs = int(r2_pool_data.num_graphs)
+        cond = torch.ones((n_graphs, 1), device=r2_pool_data.x.device)
+        _, graph_embeds = self.r2_backbone(r2_pool_data, cond)
+        return self.r2_project(graph_embeds)
 
     def r2_logits(
         self,
@@ -244,10 +319,10 @@ class GraphTransBiPolicy(nn.Module):
         else:
             query = self.r2_query_head(trunk_feats)
         if r2_keys is None:
-            if self.r2_arch == "encoder":
+            if self.r2_arch != "lookup":
                 raise ValueError(
-                    "r2_arch='encoder' requires r2_keys for r2_logits() — "
-                    "compute via policy.encode_r2_pool(r2_fps) and pass in."
+                    f"r2_arch={self.r2_arch!r} requires r2_keys for r2_logits() — "
+                    "compute via policy.encode_r2_pool(...) and pass in."
                 )
             r2_keys = self.r2_embed.weight
         return query @ r2_keys.T

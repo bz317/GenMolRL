@@ -23,13 +23,20 @@ R2 representation (``r2_arch``):
     index. **Cannot** be swapped between pools at eval time without
     breaking the index mapping. Bit-identical to the original BiPolicy.
 
-  - ``encoder``: a small MLP that maps a Morgan fingerprint to an R2 key
+  - ``encoder``: an MLP that maps a Morgan fingerprint to an R2 key
     vector. The pool is no longer baked into the parameters — any R2
     SMILES can be embedded by computing ``encoder(morgan_fp(SMILES))``.
     The trainer can swap the active pool (train ↔ test) between rollout
     and evaluation; both pools use the same encoder weights, so the
     R2 distribution generalises to unseen reactants in the chemistry
-    sense (same fingerprint → same key vector).
+    sense (same fingerprint → same key vector). When
+    ``r2_encoder_residual=True`` (the new default for Bi-PPO YAMLs)
+    the encoder is a deeper residual MLP (Option 1 upgrade): a 1024 →
+    1024 stem, ``r2_encoder_n_res_blocks`` Pre-LN residual blocks of
+    width 1024, then a 1024 → ``r2_embed_dim`` projection — roughly
+    ~5.3M parameters versus ~558k for the legacy 2-layer MLP. With
+    ``r2_encoder_residual=False`` the encoder falls back to the
+    original plain 2-layer MLP so older YAMLs stay bit-identical.
 
 ``forward_trunk`` returns shared features once per state; the trainer
 drives sampling, masking, and log-prob accounting. ``r2_logits`` is the
@@ -43,6 +50,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def _mlp(in_dim: int, hidden: int, out_dim: int, n_layers: int = 2) -> nn.Module:
@@ -53,6 +61,65 @@ def _mlp(in_dim: int, hidden: int, out_dim: int, n_layers: int = 2) -> nn.Module
         layers.extend([nn.Linear(hidden, hidden), nn.ReLU()])
     layers.append(nn.Linear(hidden, out_dim))
     return nn.Sequential(*layers)
+
+
+class _ResBlock(nn.Module):
+    """Pre-LN residual block: ``x → x + Linear(ReLU(Linear(LN(x))))``.
+
+    Two Linears per block at the same hidden width so a deep stack composes
+    cleanly without the residual path having to project. This is the same
+    pattern as the FFN blocks in a Transformer (Pre-LN variant), which is
+    the most stable choice for deeper-than-2-layer MLPs trained with PPO
+    advantages (small batches → noisy gradients).
+    """
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.ln = nn.LayerNorm(dim)
+        self.fc1 = nn.Linear(dim, dim)
+        self.fc2 = nn.Linear(dim, dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.ln(x)
+        h = self.fc1(h)
+        h = F.relu(h)
+        h = self.fc2(h)
+        return x + h
+
+
+def _residual_mlp(
+    in_dim: int,
+    hidden: int,
+    out_dim: int,
+    *,
+    n_res_blocks: int = 2,
+) -> nn.Module:
+    """Deep residual-MLP factory used by the R2 encoder under Option 1.
+
+    Layout for ``n_res_blocks = K``::
+
+        Linear(in_dim → hidden)
+        LayerNorm(hidden) ; ReLU                # stem
+        ResBlock(hidden) × K                    # body
+        Linear(hidden → out_dim)                # projection
+
+    Total Linears = ``2 + 2 * K`` (stem + 2 per block + projection); with
+    ``hidden=1024`` and ``K=2`` that's ~5.3M parameters, an order of
+    magnitude above the legacy 2-layer MLP (~558k params at 1024→512→64).
+    Used when ``r2_encoder_residual=True`` is set on the policy; the
+    legacy plain ``_mlp`` is retained for backward-compatible
+    ``r2_encoder_residual=False`` runs.
+    """
+    if n_res_blocks <= 0:
+        return _mlp(in_dim, hidden, out_dim, n_layers=2)
+    stem = nn.Sequential(
+        nn.Linear(in_dim, hidden),
+        nn.LayerNorm(hidden),
+        nn.ReLU(),
+    )
+    body = nn.Sequential(*[_ResBlock(hidden) for _ in range(n_res_blocks)])
+    proj = nn.Linear(hidden, out_dim)
+    return nn.Sequential(stem, body, proj)
 
 
 class BiPolicy(nn.Module):
@@ -79,7 +146,20 @@ class BiPolicy(nn.Module):
         r2_arch: ``'lookup'`` (legacy fixed-pool ``nn.Embedding``) or
             ``'encoder'`` (Morgan-FP MLP → r2_embed_dim, vocabulary-free).
         r2_encoder_hidden: hidden width of the R2 encoder MLP. Only used when
-            ``r2_arch='encoder'``; defaults to ``obs_dim // 2``.
+            ``r2_arch='encoder'``; defaults to ``obs_dim // 2`` in plain-MLP
+            mode and ``obs_dim`` (1024) in residual-MLP mode.
+        r2_encoder_n_layers: number of Linear layers in the plain-MLP variant
+            of the R2 encoder (used only when ``r2_encoder_residual=False``).
+            Defaults to 2 for backward compatibility.
+        r2_encoder_residual: if True, build the R2 encoder as a deep
+            Pre-LN residual MLP (Option 1 upgrade): 1 stem Linear +
+            ``r2_encoder_n_res_blocks`` residual blocks + 1 projection
+            Linear. If False, use the plain 2-layer MLP (legacy
+            behaviour, bit-identical to the original encoder).
+        r2_encoder_n_res_blocks: number of residual blocks in the deep
+            R2 encoder. Each block adds 2 Linears + LayerNorm at the
+            same hidden width. Only used when
+            ``r2_encoder_residual=True``. Defaults to 2.
         r2_fp_dim: input fingerprint dim for the R2 encoder MLP. Defaults to
             ``obs_dim`` because the same Morgan-FP layout is used for R1 and R2.
     """
@@ -96,6 +176,9 @@ class BiPolicy(nn.Module):
         r2_embed_dim: int = 64,
         r2_arch: str = "lookup",
         r2_encoder_hidden: int | None = None,
+        r2_encoder_n_layers: int = 2,
+        r2_encoder_residual: bool = False,
+        r2_encoder_n_res_blocks: int = 2,
         r2_fp_dim: int | None = None,
     ):
         super().__init__()
@@ -147,22 +230,53 @@ class BiPolicy(nn.Module):
             self.r2_encoder = None
             self.r2_fp_dim = None
         else:
-            # ``encoder``: R2 key = MLP(morgan_fp(R2_smiles)). The encoder is
-            # the SAME MLP at training and evaluation, so swapping the active
+            # ``encoder``: R2 key = encoder(morgan_fp(R2_smiles)). The encoder is
+            # the SAME network at training and evaluation, so swapping the active
             # R2 pool (train ↔ test) only changes which fingerprints get fed
             # in; the parameters are shared and any unseen pool generalises
             # in the standard "two-tower retrieval with a learned encoder"
-            # sense. The encoder is parameter-light (≈ obs_dim·hidden +
-            # hidden·r2_embed_dim) compared to a 100k-row lookup table.
+            # sense. Two variants share this branch:
+            #
+            #   - r2_encoder_residual=False (legacy): plain 2-layer MLP
+            #     (in_dim → hidden → r2_embed_dim). Bit-identical to the
+            #     original Bi-PPO encoder so older runs reproduce.
+            #
+            #   - r2_encoder_residual=True (Option 1 upgrade, current
+            #     default in ppo_bi YAMLs): deep Pre-LN residual MLP
+            #     (in_dim → hidden, K residual blocks at hidden, hidden →
+            #     r2_embed_dim). Defaults are tuned to ~5.3M parameters
+            #     at hidden=1024 and K=2; layer norm + skip connections
+            #     make the deeper stack stable under PPO advantage noise.
             self.r2_fp_dim = int(r2_fp_dim) if r2_fp_dim is not None else int(obs_dim)
-            r2_hidden = (
-                int(r2_encoder_hidden)
-                if r2_encoder_hidden is not None
-                else max(self.r2_fp_dim // 2, r2_embed_dim)
-            )
-            self.r2_encoder = _mlp(
-                self.r2_fp_dim, r2_hidden, r2_embed_dim, n_layers=2
-            )
+            self.r2_encoder_residual = bool(r2_encoder_residual)
+            if self.r2_encoder_residual:
+                # Wider default for the residual variant so each block has
+                # enough capacity to do useful nonlinear refinement on top
+                # of the skip-connected pass-through.
+                default_hidden = self.r2_fp_dim
+                r2_hidden = (
+                    int(r2_encoder_hidden)
+                    if r2_encoder_hidden is not None
+                    else max(default_hidden, r2_embed_dim)
+                )
+                self.r2_encoder = _residual_mlp(
+                    self.r2_fp_dim,
+                    r2_hidden,
+                    r2_embed_dim,
+                    n_res_blocks=int(r2_encoder_n_res_blocks),
+                )
+            else:
+                r2_hidden = (
+                    int(r2_encoder_hidden)
+                    if r2_encoder_hidden is not None
+                    else max(self.r2_fp_dim // 2, r2_embed_dim)
+                )
+                self.r2_encoder = _mlp(
+                    self.r2_fp_dim,
+                    r2_hidden,
+                    r2_embed_dim,
+                    n_layers=int(r2_encoder_n_layers),
+                )
             self.r2_embed = None
 
     def forward_trunk(self, obs: torch.Tensor) -> torch.Tensor:

@@ -262,18 +262,26 @@ class BiPPO:
         # test pool during evaluate()). This is the only way to satisfy
         # "evaluate using only test molecules for R2" because the bi train and
         # test reactant pools are completely disjoint in this dataset.
+        #
+        # Subclasses may extend ``_supported_r2_archs`` to add new values
+        # (e.g. ``GraphTransBiPPO`` adds ``'encoder_graph'`` for the Siamese
+        # GraphTransformer R2 encoder under Option 3). The validation is kept
+        # here in the base so misspelled YAMLs fail loudly at construction
+        # time, but the supported set is overridable.
         self.r2_arch = str(method_cfg.get("r2_arch", "lookup")).lower()
-        if self.r2_arch not in {"lookup", "encoder"}:
+        supported_archs = self._supported_r2_archs()
+        if self.r2_arch not in supported_archs:
             raise ValueError(
-                f"r2_arch must be 'lookup' or 'encoder', got {self.r2_arch!r}"
+                f"r2_arch must be one of {sorted(supported_archs)}, "
+                f"got {self.r2_arch!r}"
             )
-        # ``encoder`` mode is the only setting where the eval-time R2 pool
-        # differs from the training-time R2 pool. In lookup mode the table is
-        # baked at training time and the eval rollouts MUST share that pool,
-        # so ``_eval_pool_role='train'`` makes ``_swap_active_pool('train')``
-        # a no-op during evaluate(). In encoder mode ``_eval_pool_role='eval'``
-        # swaps the active pool to ``_eval_reaction_manager`` (= test pool).
-        self._eval_pool_role = "eval" if self.r2_arch == "encoder" else "train"
+        # ``lookup`` is the only setting where the eval-time R2 pool is FORCED
+        # to be the training pool (because the nn.Embedding rows are baked at
+        # training time and the indices don't exist for any other pool). Every
+        # other r2_arch (encoder, encoder_graph, ...) uses a learned encoder
+        # whose parameters are shared across pools, so evaluate() swaps the
+        # active pool to ``_eval_reaction_manager`` (= test pool).
+        self._eval_pool_role = "train" if self.r2_arch == "lookup" else "eval"
 
         # Derive the R2-axis mask source from the masking mode (the README
         # contract). reaction_valid → RDKit-validated set (zero -1 guarantee);
@@ -314,12 +322,12 @@ class BiPPO:
         )
 
         # Build the eval-pool reaction manager from the test reactants. Only
-        # needed in r2_arch='encoder' mode (the lookup mode forces eval to
-        # share the train pool because the embedding indices are baked in).
-        # Pre-compute the R2 fingerprint tensors once so the rollout / eval
-        # loops can just slice them; the policy's R2 encoder MLP is applied
-        # to these FPs on the fly to produce r2_keys.
-        if self.r2_arch == "encoder":
+        # needed when ``r2_arch != 'lookup'`` (lookup forces eval to share the
+        # train pool because the embedding indices are baked in). Subclasses
+        # may extend this with their own pool-specific caches — see
+        # ``GraphTransBiPPO._init_extra_pool_data`` for the graph-batch
+        # variant under r2_arch='encoder_graph'.
+        if self.r2_arch != "lookup":
             test_manager_source = (
                 self.test_reactants
                 if isinstance(self.test_reactants, dict)
@@ -340,10 +348,24 @@ class BiPPO:
                 self._eval_reaction_manager.reactants.keys()
             )
             self._eval_num_reactants = len(self._eval_reactant_keys)
+        else:
+            # lookup mode: eval shares the train pool (same managers / keys).
+            # Pointing the eval-pool attributes at the train pool keeps
+            # ``_swap_active_pool('eval')`` a no-op for backward compatibility.
+            self._eval_reaction_manager = self._train_reaction_manager
+            self._eval_reactant_keys = self._train_reactant_keys
+            self._eval_num_reactants = self._train_num_reactants
 
-            # Pre-compute Morgan fingerprints for both pools as torch tensors.
-            # These feed the R2 encoder MLP at every sampling / update call;
-            # building them once at init avoids per-step morgan_fp overhead.
+        # Pre-compute Morgan fingerprints for both pools as torch tensors,
+        # used by ``r2_arch='encoder'``. These feed the R2 encoder MLP at
+        # every sampling / update call; building them once at init avoids
+        # per-step morgan_fp overhead. Subclasses can override
+        # ``_init_extra_pool_data`` to add their own pool caches (e.g.
+        # GraphTransBiPPO builds torch_geometric Batches for
+        # ``r2_arch='encoder_graph'``); FP caches are still useful even when
+        # the active arch doesn't use them because we keep the fingerprint
+        # cost in one place.
+        if self.r2_arch == "encoder":
             train_fp_np = np.stack(
                 [morgan_fp_array(s) for s in self._train_reactant_keys], axis=0
             )
@@ -353,14 +375,13 @@ class BiPPO:
             self._train_r2_fps = torch.from_numpy(train_fp_np).float().to(self.device)
             self._eval_r2_fps = torch.from_numpy(test_fp_np).float().to(self.device)
         else:
-            # lookup mode: eval shares the train pool (same managers / keys /
-            # FPs). Pointing the eval-pool attributes at the train pool keeps
-            # ``_swap_active_pool('eval')`` a no-op for backward compatibility.
-            self._eval_reaction_manager = self._train_reaction_manager
-            self._eval_reactant_keys = self._train_reactant_keys
-            self._eval_num_reactants = self._train_num_reactants
             self._train_r2_fps = None
             self._eval_r2_fps = None
+
+        # Subclass hook for arch-specific pool caches (e.g. the R2 graph
+        # Batches that ``GraphTransBiPPO`` needs for ``r2_arch='encoder_graph'``).
+        # Default is a no-op so the base trainer's behaviour is unchanged.
+        self._init_extra_pool_data()
 
         # Cached r2_keys for the active scope. Populated by
         # ``_compute_active_r2_keys`` at the start of each rollout / eval
@@ -432,6 +453,30 @@ class BiPPO:
         """
         return config.get("ppo_bi", config.get("ppo", {}))
 
+    def _supported_r2_archs(self) -> set[str]:
+        """Return the set of legal ``r2_arch`` values for this trainer.
+
+        The base BiPPO trainer supports the Morgan-FP-only set
+        ``{'lookup', 'encoder'}``. Subclasses can extend it to include
+        encoder variants their policy understands (e.g. GraphTransBiPPO
+        adds ``'encoder_graph'`` for the Siamese GraphTransformer R2
+        encoder under Option 3). Overriding this is preferred over
+        re-implementing the YAML validation in each subclass.
+        """
+        return {"lookup", "encoder"}
+
+    def _init_extra_pool_data(self) -> None:
+        """Hook for arch-specific pool-data caches built at init time.
+
+        Default is a no-op (the base trainer only needs the Morgan-FP
+        tensors built unconditionally above). Subclasses override this
+        to allocate their own caches; for instance
+        ``GraphTransBiPPO._init_extra_pool_data`` builds
+        ``_train_r2_graphs`` and ``_eval_r2_graphs`` (torch_geometric
+        ``Batch`` objects) when ``r2_arch='encoder_graph'``.
+        """
+        return None
+
     def _build_policy(self, method_cfg: dict) -> torch.nn.Module:
         """Construct the policy module (overridable by subclasses).
 
@@ -451,6 +496,13 @@ class BiPPO:
             r2_embed_dim=int(method_cfg.get("r2_embed_dim", 64)),
             r2_arch=self.r2_arch,
             r2_encoder_hidden=method_cfg.get("r2_encoder_hidden"),
+            # Option 1: residual MLP for the R2 encoder. Defaults preserve
+            # the legacy plain 2-layer MLP behaviour so older YAMLs reproduce
+            # bit-for-bit; new ppo_bi YAMLs flip ``r2_encoder_residual: true``
+            # to opt into the deeper variant.
+            r2_encoder_n_layers=int(method_cfg.get("r2_encoder_n_layers", 2)),
+            r2_encoder_residual=bool(method_cfg.get("r2_encoder_residual", False)),
+            r2_encoder_n_res_blocks=int(method_cfg.get("r2_encoder_n_res_blocks", 2)),
         ).to(self.device)
 
     def _encode_smiles(self, smiles_list: list[str]) -> torch.Tensor:
@@ -491,28 +543,48 @@ class BiPPO:
         else:
             raise ValueError(f"pool must be 'train' or 'eval', got {pool!r}")
 
+    def _r2_pool_data_for(self, pool: str):
+        """Return the input passed to ``policy.encode_r2_pool`` for ``pool``.
+
+        Default returns the pre-computed Morgan-FP tensor for the named
+        pool — this is what ``r2_arch='encoder'`` consumes. Subclasses
+        override this to return arch-specific data; e.g.
+        ``GraphTransBiPPO._r2_pool_data_for`` returns a torch_geometric
+        ``Batch`` when ``r2_arch='encoder_graph'`` so the policy's
+        Siamese R2 GraphTransformer can encode the pool directly from
+        graphs. Called by :meth:`_compute_active_r2_keys` only when
+        ``r2_arch != 'lookup'``.
+        """
+        if pool == "train":
+            return self._train_r2_fps
+        if pool == "eval":
+            return self._eval_r2_fps
+        raise ValueError(f"pool must be 'train' or 'eval', got {pool!r}")
+
     def _compute_active_r2_keys(self, *, pool: str, with_grad: bool) -> torch.Tensor:
         """Return ``r2_keys`` for the named pool, honouring the grad context.
 
         In ``r2_arch='lookup'`` mode this returns ``self.policy.r2_embed.weight``
         regardless of pool (the embedding is fixed to the train pool by design).
-        In ``r2_arch='encoder'`` mode the policy's R2 MLP is applied to the
-        pool's pre-computed Morgan fingerprints. ``with_grad=False`` is used
+        Otherwise the policy's R2 encoder is applied to the pool input data
+        returned by :meth:`_r2_pool_data_for` — Morgan-FP tensor under
+        ``r2_arch='encoder'``, torch_geometric ``Batch`` under
+        ``r2_arch='encoder_graph'`` in subclasses. ``with_grad=False`` is used
         for rollouts and evaluation (one forward pass per sweep, no autograd);
         ``with_grad=True`` is used inside the PPO update so gradients flow
-        into the encoder MLP each minibatch.
+        into the encoder each minibatch.
         """
         if self.r2_arch == "lookup":
             return self.policy.r2_embed.weight
-        r2_fps = self._train_r2_fps if pool == "train" else self._eval_r2_fps
-        if r2_fps is None:
+        pool_data = self._r2_pool_data_for(pool)
+        if pool_data is None:
             raise RuntimeError(
-                f"r2_arch='encoder' but {pool} pool r2_fps is not initialised."
+                f"r2_arch={self.r2_arch!r} but {pool} pool data is not initialised."
             )
         if with_grad:
-            return self.policy.encode_r2_pool(r2_fps)
+            return self.policy.encode_r2_pool(pool_data)
         with torch.no_grad():
-            return self.policy.encode_r2_pool(r2_fps)
+            return self.policy.encode_r2_pool(pool_data)
 
     # ------------------------------------------------------------------
     # Masks
@@ -1054,6 +1126,31 @@ class BiPPO:
     # PPO update
     # ------------------------------------------------------------------
 
+    def _r2_keys_for_update(self) -> torch.Tensor:
+        """Hook: return ``r2_keys`` for the current PPO minibatch.
+
+        Default recomputes from scratch *with grad* each call — fine for
+        cheap encoders (``lookup`` is a free view onto ``r2_embed.weight``;
+        ``encoder`` is a single MLP forward over ~116k FPs, milliseconds
+        on GPU). Subclasses with expensive pool-encoding paths can
+        override this to amortise: e.g. ``GraphTransBiPPO`` under
+        ``r2_arch='encoder_graph'`` refreshes the Siamese R2
+        GraphTransformer's keys only every ``r2_keys_refresh_minibatches``
+        and reuses a detached cache in between. See
+        :meth:`_begin_update_cycle` for the per-update reset hook.
+        """
+        return self._compute_active_r2_keys(pool="train", with_grad=True)
+
+    def _begin_update_cycle(self) -> None:
+        """Hook called once at the top of every :meth:`ppo_update`.
+
+        Default is a no-op. Subclasses use this to reset any per-update
+        state — e.g. ``GraphTransBiPPO`` invalidates its
+        ``_cached_r2_keys`` here so the next ``_r2_keys_for_update`` call
+        triggers a fresh, gradient-attached pool encoding.
+        """
+        return None
+
     def _evaluate_minibatch(
         self,
         smiles_batch: list[str],
@@ -1080,10 +1177,10 @@ class BiPPO:
 
         # R2 component: zero contribution for STOP rows, otherwise log π(R2|...).
         # The PPO update always runs on transitions collected from the train
-        # pool, so r2_keys are re-encoded WITH gradients (encoder mode) or
-        # read straight from r2_embed.weight (lookup mode) — see
-        # :meth:`_compute_active_r2_keys`.
-        r2_keys = self._compute_active_r2_keys(pool="train", with_grad=True)
+        # pool. ``_r2_keys_for_update`` is the hook subclasses use to amortise
+        # expensive encoders; the base trainer just delegates straight to
+        # ``_compute_active_r2_keys(pool='train', with_grad=True)``.
+        r2_keys = self._r2_keys_for_update()
         if self.policy_arch == "hierarchical":
             safe_t = torch.where(is_stop, torch.zeros_like(t_actions), t_actions)
             r2_logits = self.policy.r2_logits(trunk, safe_t, r2_keys=r2_keys)
@@ -1110,6 +1207,10 @@ class BiPPO:
         returns: np.ndarray,
     ) -> dict[str, float]:
         self.policy.train()
+        # Subclass hook: invalidate any per-update caches (e.g. the
+        # encoder_graph r2_keys cache in GraphTransBiPPO) so the next
+        # minibatch starts from a fresh, gradient-attached encoding.
+        self._begin_update_cycle()
         n = len(rollout)
         old_values = np.array([tr.value for tr in rollout], dtype=np.float32)
         adv_norm = advantages.copy()

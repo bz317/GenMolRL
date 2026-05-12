@@ -74,7 +74,26 @@ ppo_bi:
   #     Trade-off: every PPO minibatch re-encodes the train R2 pool (~116k
   #     fingerprints through a small MLP) to flow gradients into the encoder.
   r2_arch: encoder
-  # r2_encoder_hidden: 512  # defaults to obs_dim // 2 = 512 in encoder mode
+  #
+  # R2 encoder architecture (Option 1 upgrade for Bi-PPO).
+  #
+  # Two MLP variants share the ``r2_arch='encoder'`` branch:
+  #   - r2_encoder_residual: false → legacy plain 2-layer MLP
+  #       (in_dim → r2_encoder_hidden → r2_embed_dim). ~558k params at
+  #       hidden=512. Bit-identical to the original Bi-PPO encoder so
+  #       older runs reproduce.
+  #   - r2_encoder_residual: true (current default) → deep Pre-LN
+  #       residual MLP: 1 stem Linear + r2_encoder_n_res_blocks ResBlocks
+  #       (each LN → Linear → ReLU → Linear → skip) + 1 projection
+  #       Linear. At hidden=1024 and 2 ResBlocks this is ~5.3M params
+  #       — roughly 10× the legacy encoder, but the residual + LayerNorm
+  #       backbone keeps the deeper stack stable under PPO advantage noise.
+  #       Recommended default to give the R2 encoder enough capacity to
+  #       learn a richer mapping from Morgan FPs to retrieval keys.
+  r2_encoder_residual: true
+  r2_encoder_hidden: 1024
+  r2_encoder_n_res_blocks: 2
+  # r2_encoder_n_layers: 2  # used only when r2_encoder_residual=false
   learning_rate: 0.0003
   n_steps: 2048
   batch_size: 64
