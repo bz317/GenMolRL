@@ -1,5 +1,5 @@
 project: GenMolRL_Bi
-experiment_name: GraphTransPPO_Bi_MultiDiscrete
+experiment_name: GraphTransPPO_Bi_MultiDiscrete_Lookup
 reaction_mode: bi
 # r2_available is the default bi-mode masking (see the hierarchical config
 # for the full rationale). Pattern-match for T and the union-of-templates
@@ -40,31 +40,39 @@ graphtransppo_bi:
   policy_arch: multidiscrete
   # r2_arch controls the R2 representation (see the hierarchical YAML for
   # the full encoder_graph rationale):
-  #   - 'lookup' (legacy): fixed nn.Embedding for the train R2 pool.
-  #   - 'encoder': MLP(morgan_fp(R2_SMILES)) — asymmetric two-tower.
-  #   - 'encoder_graph' (Option 3, current default): Siamese R2
-  #     GraphTransformer + projection. Both towers graph-encoded; R2
-  #     pool is swappable train ↔ test at eval time.
-  r2_arch: encoder_graph
+  #   - 'lookup' (current default): fixed nn.Embedding for the train R2
+  #     pool — one learned vector per R2 SMILES in the training pool.
+  #     The R2 vocabulary is baked at training time, so eval MUST draw
+  #     R2 from the SAME train pool (eval_r2_pool: train, enforced by
+  #     the trainer). This matches the gr7aa7z6 / Bi-PPO lookup setup,
+  #     so the only axis of comparison against Bi-PPO is the trunk
+  #     encoder (graph vs Morgan-MLP).
+  #   - 'encoder': MLP(morgan_fp(R2_SMILES)) — asymmetric two-tower,
+  #     compatible with eval_r2_pool: test.
+  #   - 'encoder_graph': Siamese R2 GraphTransformer + projection.
+  #     Both towers graph-encoded; compatible with eval_r2_pool: test.
+  #     The r2_num_emb / r2_num_layers / r2_num_heads /
+  #     r2_keys_refresh_minibatches knobs below are commented out
+  #     because they're encoder_graph-only — uncomment when flipping
+  #     r2_arch back.
+  r2_arch: lookup
   # eval_r2_pool: see configs/ppo_bi_hierarchical_delta_qed.yaml for the
-  # full compatibility matrix. Default "test" (strict test-only R2 at
-  # eval). Flip to "train" for apples-to-apples comparison against the
-  # lookup / gr7aa7z6 baseline. Lookup + test → ValueError.
-  eval_r2_pool: test
+  # full compatibility matrix. Forced to "train" here because r2_arch is
+  # lookup — the embedding table has no rows for test reactants.
+  eval_r2_pool: train
   # GraphTransformer backbone for R1 (same defaults as graphtransrl /
   # graphtransppo so the R1 trunk stays bit-comparable across the three
   # graph algorithms). Pooled R1 trunk feature dim = 2 * num_emb = 128.
   num_emb: 64
   num_layers: 3
   num_heads: 2
-  # GraphTransformer backbone for R2 (Option 3) — intentionally smaller
-  # than R1 because the R2 pool is re-encoded over ~116k candidate
-  # graphs every refresh. See the hierarchical YAML for the cost /
-  # gradient-density trade-off behind these defaults.
-  r2_num_emb: 32
-  r2_num_layers: 1
-  r2_num_heads: 2
-  r2_keys_refresh_minibatches: 8
+  # GraphTransformer backbone for R2 (encoder_graph only — DORMANT under
+  # r2_arch: lookup). Uncomment when flipping r2_arch to encoder_graph
+  # and flipping eval_r2_pool to test.
+  # r2_num_emb: 32
+  # r2_num_layers: 1
+  # r2_num_heads: 2
+  # r2_keys_refresh_minibatches: 8
   learning_rate: 0.0003
   n_steps: 2048
   batch_size: 64

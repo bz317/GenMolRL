@@ -1,0 +1,42 @@
+project: GenMolRL_Bi
+experiment_name: RandomSearch_Bi_TrainR2
+reaction_mode: bi
+# Same r2_available mask + delta_qed reward as the test-R2 variant. The
+# ONLY difference is the R2 candidate pool: this run draws R2 from the
+# *training* reactant pool, matching any bi-PPO eval loop that uses
+# r2_arch: lookup + eval_r2_pool: train (the gr7aa7z6 baseline). Start
+# molecules are still the test pool so the trajectory metric is
+# directly comparable to the bi-PPO eval/mean_reward computed over the
+# test starts — only the R2 retrieval set changes.
+masking: r2_available
+reward: delta_qed
+max_episode_len: 5
+dataset:
+  # test_file = start-molecule list. Always the test pool so trajectory
+  # metrics are computed over the same set of test molecules as every
+  # other bi method (bi-PPO eval, bi-exhaustive, etc.).
+  test_file: data/Bi/reactants_test.pkl
+  # r2_pool_file decouples the R2 candidate pool from the start pool.
+  # When set, the SearchRunner builds its ReactionManager on this pool
+  # (so get_valid_reactants(T) and the r2_available mask use train R2s)
+  # while still iterating start molecules from test_file. Leaving this
+  # unset is the legacy behaviour (single pool = test_file used for
+  # both, identical to configs/random_search_bi_delta_qed.yaml).
+  r2_pool_file: data/Bi/reactants_train.pkl
+  templates_file: data/Bi/templates.pkl
+env:
+  invalid_reaction_penalty: -1.0
+  reward_round_digits: 3
+  info_qed_round_digits: 3
+training:
+  seed: 42
+search:
+  # Same one-path-per-start cap as the test-R2 variant. The runner walks
+  # the test pool once and emits exactly one random trajectory per start.
+  max_paths: null
+  max_attempts: null
+  max_reactions: null
+  max_starts: null
+  results_file: runs/random_search_bi_train_r2_results.txt
+  overwrite_results: true
+  use_wandb: true

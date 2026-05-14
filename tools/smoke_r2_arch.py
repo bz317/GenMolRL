@@ -532,6 +532,256 @@ def case_encoder_multidiscrete() -> None:
     print("  PASS")
 
 
+def case_graphtransbi_lookup_train() -> None:
+    """GraphTransBiPPO with r2_arch=lookup + eval_r2_pool=train.
+
+    Mirrors the gr7aa7z6 wiring on the graph-trunk algorithm. Verifies:
+
+      - ``_eval_pool_role == "train"``, ``eval_r2_pool == "train"``.
+      - ``_eval_reaction_manager is _train_reaction_manager`` (eval aliased
+        to train, no extra pool allocated).
+      - Policy has ``r2_embed`` and no encoder modules (no
+        ``r2_encoder`` MLP, no ``r2_backbone`` / ``r2_project``
+        encoder_graph stack).
+      - No FP / graph batch caches allocated.
+      - ``r2_keys`` consumed during the PPO update IS exactly
+        ``policy.r2_embed.weight``.
+      - End-to-end rollout + update + evaluate runs to completion
+        without dimension errors on the test starts.
+    """
+    if not _check_graph_dependencies_present():
+        print("\n===== CASE  GraphTransBiPPO  r2_arch=lookup + eval_r2_pool=train  =====")
+        print("  SKIP (torch_geometric not installed)")
+        return
+    print("\n===== CASE  GraphTransBiPPO  r2_arch=lookup + eval_r2_pool=train  =====")
+    from genmolrl.algorithms.graphtransppo_bi.train import GraphTransBiPPO
+
+    config = load_config("configs/graphtransppo_bi_hierarchical_delta_qed.yaml")
+    config["masking"] = "r2_available"
+    config.setdefault("graphtransppo_bi", {})
+    # Override to lookup + train regardless of what the YAML now defaults to,
+    # so this case asserts the wiring works irrespective of YAML drift.
+    config["graphtransppo_bi"]["policy_arch"] = "hierarchical"
+    config["graphtransppo_bi"]["r2_arch"] = "lookup"
+    config["graphtransppo_bi"]["eval_r2_pool"] = "train"
+    config["graphtransppo_bi"]["r2_resample_retries"] = 8
+    config["graphtransppo_bi"]["n_steps"] = 8
+    config["graphtransppo_bi"]["batch_size"] = 4
+    config["graphtransppo_bi"]["n_epochs"] = 1
+    config["graphtransppo_bi"]["num_emb"] = 16
+    config["graphtransppo_bi"]["num_layers"] = 1
+    config["graphtransppo_bi"]["num_heads"] = 1
+    config["graphtransppo_bi"]["template_embed_dim"] = 16
+    config["graphtransppo_bi"]["r2_embed_dim"] = 16
+    config["graphtransppo_bi"]["device"] = "cpu"
+    # encoder_graph-only knobs from the YAML should be dormant — set them
+    # to something obviously-not-meaningful so any code path that
+    # accidentally reads them in lookup mode will blow up loudly.
+    for stale_key in (
+        "r2_num_emb",
+        "r2_num_layers",
+        "r2_num_heads",
+        "r2_keys_refresh_minibatches",
+    ):
+        config["graphtransppo_bi"].pop(stale_key, None)
+    config.setdefault("training", {})
+    config["training"]["total_timesteps"] = 8
+
+    import pickle
+    from genmolrl.config import resolve_path
+
+    with open(resolve_path(config["dataset"]["training_file"]), "rb") as f:
+        train_full = pickle.load(f)
+    with open(resolve_path(config["dataset"]["test_file"]), "rb") as f:
+        test_full = pickle.load(f)
+    rng = random.Random(0)
+    train_small = _subsample_pool(train_full, TRAIN_SUBSAMPLE, rng)
+    test_small = _subsample_pool(test_full, TEST_SUBSAMPLE, rng)
+    scratch = Path("/tmp/genmolrl_smoke_gtb_lookup_train")
+    scratch.mkdir(parents=True, exist_ok=True)
+    train_path = scratch / "reactants_train.pkl"
+    test_path = scratch / "reactants_test.pkl"
+    with open(train_path, "wb") as f:
+        pickle.dump(train_small, f)
+    with open(test_path, "wb") as f:
+        pickle.dump(test_small, f)
+    config["dataset"]["training_file"] = str(train_path)
+    config["dataset"]["test_file"] = str(test_path)
+
+    t0 = time.monotonic()
+    trainer = GraphTransBiPPO(config)
+
+    # Wiring: lookup + train should alias eval pool to train pool with no
+    # extra allocations.
+    assert trainer.r2_arch == "lookup", trainer.r2_arch
+    assert trainer._eval_pool_role == "train"
+    assert trainer.eval_r2_pool == "train"
+    assert trainer._eval_reaction_manager is trainer._train_reaction_manager, (
+        "lookup + train must alias eval manager to train manager"
+    )
+    # Policy: lookup table, no encoder.
+    assert trainer.policy.r2_embed is not None
+    assert trainer.policy.r2_encoder is None, (
+        "lookup mode must not instantiate the r2_encoder MLP"
+    )
+    # encoder_graph-specific attributes either don't exist or are None.
+    assert getattr(trainer.policy, "r2_backbone", None) is None, (
+        "lookup mode must not instantiate the Siamese R2 GraphTransformer"
+    )
+    assert getattr(trainer.policy, "r2_project", None) is None
+    # Pool caches: no FPs (encoder), no graphs (encoder_graph).
+    assert trainer._train_r2_fps is None and trainer._eval_r2_fps is None
+    assert trainer._train_r2_graphs is None and trainer._eval_r2_graphs is None
+
+    # r2_keys at update time IS the lookup table.
+    r2_keys = trainer._compute_active_r2_keys(pool="train", with_grad=True)
+    assert r2_keys is trainer.policy.r2_embed.weight, (
+        "lookup mode must return the embedding weight matrix directly"
+    )
+
+    rollout, last_value = trainer.collect_rollout(8, base_step=0, log_episodes=False)
+    advantages, returns = trainer.compute_gae(rollout, last_value)
+    metrics = trainer.ppo_update(rollout, advantages, returns)
+    eval_m = trainer.evaluate()
+    elapsed = time.monotonic() - t0
+    bad = {
+        k: v for k, v in metrics.items()
+        if not math.isfinite(float(v)) and k != "train/explained_variance"
+    }
+    assert not bad, f"  FAIL: non-finite update metrics: {bad}"
+    print(
+        f"  wiring: r2_arch=lookup eval_pool=train  "
+        f"eval_mgr_is_train_mgr={trainer._eval_reaction_manager is trainer._train_reaction_manager}  "
+        f"r2_keys_is_lookup=True"
+    )
+    print(
+        f"  rollout={len(rollout)} update_loss={metrics['train/loss']:.4f} "
+        f"eval_n={eval_m['eval/n_molecules']} "
+        f"eval_mean_reward={eval_m['eval/mean_reward']:.4f} "
+        f"|train|={trainer._train_num_reactants} elapsed={elapsed:.1f}s"
+    )
+    print("  PASS")
+
+
+def case_graphtransbi_multidiscrete_lookup_train() -> None:
+    """Sibling smoke for GraphTransBiPPO with policy_arch=multidiscrete +
+    r2_arch=lookup + eval_r2_pool=train. Confirms the
+    configs/graphtransppo_bi_multidiscrete_delta_qed.yaml default wiring
+    is also valid (multidiscrete + lookup is the SB3-style independent
+    R2 head over the lookup table)."""
+    if not _check_graph_dependencies_present():
+        print("\n===== CASE  GraphTransBiPPO  multidiscrete + lookup + train  =====")
+        print("  SKIP (torch_geometric not installed)")
+        return
+    print("\n===== CASE  GraphTransBiPPO  multidiscrete + lookup + train  =====")
+    from genmolrl.algorithms.graphtransppo_bi.train import GraphTransBiPPO
+
+    config = load_config("configs/graphtransppo_bi_multidiscrete_delta_qed.yaml")
+    config["masking"] = "r2_available"
+    config.setdefault("graphtransppo_bi", {})
+    config["graphtransppo_bi"]["policy_arch"] = "multidiscrete"
+    config["graphtransppo_bi"]["r2_arch"] = "lookup"
+    config["graphtransppo_bi"]["eval_r2_pool"] = "train"
+    config["graphtransppo_bi"]["r2_resample_retries"] = 8
+    config["graphtransppo_bi"]["n_steps"] = 8
+    config["graphtransppo_bi"]["batch_size"] = 4
+    config["graphtransppo_bi"]["n_epochs"] = 1
+    config["graphtransppo_bi"]["num_emb"] = 16
+    config["graphtransppo_bi"]["num_layers"] = 1
+    config["graphtransppo_bi"]["num_heads"] = 1
+    config["graphtransppo_bi"]["template_embed_dim"] = 16
+    config["graphtransppo_bi"]["r2_embed_dim"] = 16
+    config["graphtransppo_bi"]["device"] = "cpu"
+    for stale_key in (
+        "r2_num_emb",
+        "r2_num_layers",
+        "r2_num_heads",
+        "r2_keys_refresh_minibatches",
+    ):
+        config["graphtransppo_bi"].pop(stale_key, None)
+    config.setdefault("training", {})
+    config["training"]["total_timesteps"] = 8
+
+    import pickle
+    from genmolrl.config import resolve_path
+
+    with open(resolve_path(config["dataset"]["training_file"]), "rb") as f:
+        train_full = pickle.load(f)
+    with open(resolve_path(config["dataset"]["test_file"]), "rb") as f:
+        test_full = pickle.load(f)
+    rng = random.Random(0)
+    train_small = _subsample_pool(train_full, TRAIN_SUBSAMPLE, rng)
+    test_small = _subsample_pool(test_full, TEST_SUBSAMPLE, rng)
+    scratch = Path("/tmp/genmolrl_smoke_gtb_multi_lookup_train")
+    scratch.mkdir(parents=True, exist_ok=True)
+    train_path = scratch / "reactants_train.pkl"
+    test_path = scratch / "reactants_test.pkl"
+    with open(train_path, "wb") as f:
+        pickle.dump(train_small, f)
+    with open(test_path, "wb") as f:
+        pickle.dump(test_small, f)
+    config["dataset"]["training_file"] = str(train_path)
+    config["dataset"]["test_file"] = str(test_path)
+
+    t0 = time.monotonic()
+    trainer = GraphTransBiPPO(config)
+    assert trainer.r2_arch == "lookup"
+    assert trainer.policy_arch == "multidiscrete"
+    assert trainer._eval_pool_role == "train"
+    assert trainer._eval_reaction_manager is trainer._train_reaction_manager
+    assert trainer.policy.r2_embed is not None
+    assert trainer.policy.r2_encoder is None
+    assert getattr(trainer.policy, "r2_backbone", None) is None
+    rollout, last_value = trainer.collect_rollout(8, base_step=0, log_episodes=False)
+    advantages, returns = trainer.compute_gae(rollout, last_value)
+    metrics = trainer.ppo_update(rollout, advantages, returns)
+    eval_m = trainer.evaluate()
+    elapsed = time.monotonic() - t0
+    assert math.isfinite(float(metrics["train/loss"]))
+    print(
+        f"  rollout={len(rollout)} update_loss={metrics['train/loss']:.4f} "
+        f"eval_n={eval_m['eval/n_molecules']} eval_mean_reward={eval_m['eval/mean_reward']:.4f} "
+        f"|train|={trainer._train_num_reactants} elapsed={elapsed:.1f}s"
+    )
+    print("  PASS")
+
+
+def case_graphtransbi_yaml_default_roundtrip() -> None:
+    """Load the two graphtransppo_bi YAMLs as-is and assert the new
+    defaults are r2_arch=lookup + eval_r2_pool=train. Catches accidental
+    drift back to encoder_graph at the YAML layer."""
+    print("\n===== CASE  graphtransppo_bi YAML defaults  =====")
+    for yaml_path, expected_policy in [
+        ("configs/graphtransppo_bi_hierarchical_delta_qed.yaml", "hierarchical"),
+        ("configs/graphtransppo_bi_multidiscrete_delta_qed.yaml", "multidiscrete"),
+    ]:
+        config = load_config(yaml_path)
+        block = config.get("graphtransppo_bi", {})
+        assert block.get("policy_arch") == expected_policy, (
+            f"  FAIL: {yaml_path} policy_arch={block.get('policy_arch')!r}, "
+            f"expected {expected_policy!r}"
+        )
+        assert block.get("r2_arch") == "lookup", (
+            f"  FAIL: {yaml_path} r2_arch={block.get('r2_arch')!r}, "
+            f"expected 'lookup'"
+        )
+        assert block.get("eval_r2_pool") == "train", (
+            f"  FAIL: {yaml_path} eval_r2_pool={block.get('eval_r2_pool')!r}, "
+            f"expected 'train'"
+        )
+        # The encoder_graph-only knobs should be DORMANT (commented out
+        # or absent) under lookup. If a YAML accidentally re-introduces
+        # them, the construction guard below would still allow the run,
+        # but they'd silently be ignored — surface that here.
+        for stale in ("r2_num_emb", "r2_num_layers", "r2_num_heads", "r2_keys_refresh_minibatches"):
+            assert stale not in block, (
+                f"  FAIL: {yaml_path} has stale encoder_graph knob "
+                f"{stale!r}={block[stale]!r} under r2_arch=lookup — comment it out"
+            )
+        print(f"  {yaml_path}: policy_arch={expected_policy}, r2_arch=lookup, eval_r2_pool=train  OK")
+    print("  PASS")
+
+
 def case_graphtransbi_encoder() -> None:
     print("\n===== CASE  GraphTransBiPPO  r2_arch=encoder  policy_arch=hierarchical  =====")
     from genmolrl.algorithms.graphtransppo_bi.train import GraphTransBiPPO
@@ -1044,6 +1294,12 @@ def main() -> None:
     case_graphtransbi_encoder()
     case_residual_mlp_bipolicy()                # Option 1: deeper R2 MLP for BiPPO
     case_graphtransbi_encoder_graph()           # Option 3: Siamese R2 GT for GraphTransBiPPO
+    # graphtransppo_bi: new lookup + train default (matches gr7aa7z6
+    # discipline on the graph-trunk algorithm — only the R1 encoder
+    # differs from Bi-PPO):
+    case_graphtransbi_lookup_train()
+    case_graphtransbi_multidiscrete_lookup_train()
+    case_graphtransbi_yaml_default_roundtrip()
     # eval_r2_pool knob cases (gr7aa7z6 reproducibility):
     case_lookup_explicit_train_gr7aa7z6_mirror()
     case_lookup_test_errors()

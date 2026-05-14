@@ -18,7 +18,7 @@
 #! Name of the job:
 #SBATCH -J genmolrl_ppo_bi_hier
 #! Which project should be charged (NB Wilkes2 projects end in '-GPU'):
-#SBATCH -A MLMI-BZ317-SL2-GPU
+#SBATCH -A OZTIRELI-SL2-GPU
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1

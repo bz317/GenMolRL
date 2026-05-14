@@ -1,0 +1,123 @@
+#!/bin/bash
+#!
+#! SLURM job script for GenMolRL Bi-reaction random search (train-R2 variant).
+#! Calls run_genmolrl_random_search_bi_train_r2.sh. No model is trained — for
+#! each test start molecule the runner samples a single uniformly-random
+#! valid template (under r2_available masking) and then a single
+#! uniformly-random R2 from that template's pattern-match pool, applies the
+#! reaction, and repeats up to max_episode_len steps. The R2 pool is the
+#! *training* reactant pool (~116k entries) instead of the test pool, which
+#! makes the run a directly comparable baseline for any bi-PPO eval loop
+#! that uses r2_arch: lookup + eval_r2_pool: train (e.g. the gr7aa7z6
+#! reproduction in configs/ppo_bi_hierarchical_lookup_delta_qed.yaml).
+#!
+#! The work is CPU-bound (RDKit reaction application + qed scoring); the
+#! GPU partition is used only for parity with the other Bi slurm scripts
+#! and account availability.
+#!
+
+#!#############################################################
+#!#### Modify the options in this section as appropriate ######
+#!#############################################################
+
+#! sbatch directives begin here ###############################
+#! Name of the job:
+#SBATCH -J genmolrl_random_search_bi_train_r2
+#! Which project should be charged (NB Wilkes2 projects end in '-GPU'):
+#SBATCH -A MLMI-BZ317-SL2-GPU
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:1
+#SBATCH --time=12:00:00
+#SBATCH --mail-user=bz317@cam.ac.uk
+#SBATCH --mail-type=ALL
+
+#SBATCH -p ampere
+
+##SBATCH -o logs/random_search_bi_train_r2_%j.out
+##SBATCH -e logs/random_search_bi_train_r2_%j.err
+
+#! sbatch directives end here #################################
+
+#! ######################################################################################
+#! Optional overrides (export before sbatch or use --export=...)
+#!   CONDA_ENV=RL_for_new_mol (default in run_genmolrl_random_search_bi_train_r2.sh)
+#!   REACTION_MODE=bi, MASKING=r2_available, REWARD=delta_qed
+#!   CONFIG=configs/random_search_bi_train_r2_delta_qed.yaml
+#!   EXPERIMENT_NAME=RandomSearch_Bi_TrainR2
+#!   STAGE_DATA=false
+#!   TEST_FILE=..., TEMPLATES_FILE=... (or TEMPLATE_FILE=...)
+#!   MAX_EPISODE_LEN=...
+#!   WANDB_MODE=offline, WANDB_INIT_TIMEOUT=600
+#! ######################################################################################
+
+#! Submit from repo root (recommended):
+#!   cd /home/bz317/rds/hpc-work/GenMolRL/GenMolRL && sbatch run_launcher/HPC_scripts/bi/slurm_genmolrl_gpu_random_search_train_r2
+
+numnodes=$SLURM_JOB_NUM_NODES
+numtasks=$SLURM_NTASKS
+mpi_tasks_per_node=$(echo "$SLURM_TASKS_PER_NODE" | sed -e  's/^\([0-9][0-9]*\).*$/\1/')
+
+#! Environment setup (Ampere stack)
+. /etc/profile.d/modules.sh
+module purge
+module load rhel8/default-amp
+
+#! Conda: use RDS Miniconda — matches RL_for_new_mol install location
+CONDA_ROOT="${CONDA_ROOT:-/home/bz317/rds/hpc-work/miniconda3}"
+source "${CONDA_ROOT}/etc/profile.d/conda.sh"
+CONDA_ENV="${CONDA_ENV:-RL_for_new_mol}"
+conda activate "${CONDA_ENV}"
+
+#! Resolve the project root (the directory holding `genmolrl/`, `configs/`,
+#! `data/`, `runs/`, `run_launcher/`, ...). The fallback chain handles the
+#! cases where sbatch is invoked from the project root, from
+#! `${PROJECT_ROOT}/run_launcher`, from the directory holding this file
+#! itself, or two levels deeper. The last fallback is the hardcoded
+#! absolute path so the script still works under a stray sbatch.
+LAUNCHER_REL="run_launcher/HPC_sh_files/run_genmolrl_random_search_bi_train_r2.sh"
+for _cand in "${SLURM_SUBMIT_DIR}" "${SLURM_SUBMIT_DIR}/.." "${SLURM_SUBMIT_DIR}/../.." "${SLURM_SUBMIT_DIR}/../../.." "/home/bz317/rds/hpc-work/GenMolRL/GenMolRL"; do
+  if [ -f "${_cand}/${LAUNCHER_REL}" ]; then
+    PROJECT_ROOT="$(cd "${_cand}" && pwd)"
+    break
+  fi
+done
+unset _cand
+LAUNCHER_PATH="${PROJECT_ROOT}/${LAUNCHER_REL}"
+
+export OMP_NUM_THREADS=1
+export PYTHONUNBUFFERED=1
+
+###############################################################
+### You should not have to change anything below this line ####
+###############################################################
+
+cd "${PROJECT_ROOT}"
+mkdir -p logs runs
+JOBID=$SLURM_JOB_ID
+
+export WANDB_DIR="${WANDB_DIR:-${PROJECT_ROOT}/runs/wandb}"
+mkdir -p "${WANDB_DIR}"
+
+# YAML owns experiment_name; SLURM only tags the run with _HPC.
+export WANDB_RUN_POST_APPEND="${WANDB_RUN_POST_APPEND:-HPC}"
+
+CMD="bash \"${LAUNCHER_PATH}\""
+CMD="$CMD 2>&1 | tee logs/random_search_bi_train_r2_${JOBID}.log"
+
+echo -e "JobID: $JOBID\n======"
+echo "Time: $(date)"
+echo "Running on: $(hostname)"
+echo "PROJECT_ROOT: ${PROJECT_ROOT}"
+echo "CONDA_ROOT: ${CONDA_ROOT}"
+echo "CONDA_ENV: ${CONDA_ENV}"
+echo "WANDB_RUN_POST_APPEND: ${WANDB_RUN_POST_APPEND}"
+echo "WANDB_DIR: ${WANDB_DIR}"
+echo "STAGE_DATA: ${STAGE_DATA:-true}"
+echo "TEST_FILE: ${TEST_FILE:-}"
+echo "TEMPLATES_FILE: ${TEMPLATES_FILE:-${TEMPLATE_FILE:-}}"
+echo "MAX_EPISODE_LEN: ${MAX_EPISODE_LEN:-}"
+echo -e "\nnumtasks=$numtasks, numnodes=$numnodes (OMP_NUM_THREADS=$OMP_NUM_THREADS)"
+echo -e "\nExecuting:\n==================\n$CMD\n"
+
+eval $CMD

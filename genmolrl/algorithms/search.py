@@ -84,15 +84,53 @@ class SearchRunner:
         random.seed(self.seed)
         np.random.seed(self.seed)
 
-        reactant_pool_file = self.dataset.get("test_file")
-        if reactant_pool_file is None:
+        # Search baselines load two molecule sets:
+        #
+        #   - ``dataset.test_file`` is ALWAYS the list of *start molecules*
+        #     the search iterates over (one trajectory per test reactant).
+        #   - ``dataset.r2_pool_file`` (optional) is the *R2 candidate pool*
+        #     the ``ReactionManager`` is built on. The manager owns:
+        #         (a) the per-template R2 pattern-match lists used by
+        #             ``get_valid_reactants(template_idx)`` and the
+        #             ``r2_available`` mask, and
+        #         (b) ``apply_reaction(current, T, R2)``.
+        #     When ``r2_pool_file`` is unset the search uses the same pool
+        #     for both — preserving the historical "test_file is both the
+        #     start list and the R2 pool" behaviour exactly (so existing
+        #     ``configs/random_search_bi_delta_qed.yaml`` /
+        #     ``configs/exhausted_search_bi_delta_qed.yaml`` are bit-for-bit
+        #     unchanged).
+        #
+        # The decoupled mode (``r2_pool_file: data/Bi/reactants_train.pkl``)
+        # exists specifically to mirror gr7aa7z6 / any bi-PPO run with
+        # ``eval_r2_pool: train``: those eval loops iterate test start
+        # molecules but draw R2 from the *training* pool. Without
+        # decoupling, the random / exhaustive baselines would be matched
+        # only to the ``eval_r2_pool: test`` variants.
+        start_pool_file = self.dataset.get("test_file")
+        if start_pool_file is None:
             raise KeyError("dataset.test_file must be set for search baselines")
-        reactants = load_pickle(resolve_path(reactant_pool_file))
+        start_reactants = load_pickle(resolve_path(start_pool_file))
+        r2_pool_file = self.dataset.get("r2_pool_file")
+        if r2_pool_file is None or os.fspath(resolve_path(r2_pool_file)) == os.fspath(
+            resolve_path(start_pool_file)
+        ):
+            r2_pool_file = start_pool_file
+            r2_reactants = start_reactants
+        else:
+            r2_reactants = load_pickle(resolve_path(r2_pool_file))
+        self.start_pool_file = str(start_pool_file)
+        self.r2_pool_file = str(r2_pool_file)
         templates = load_pickle(resolve_path(self.dataset["templates_file"]))
-        all_manager = ReactionManager(templates, reactants)
+        # The R2 pool is the one the manager indexes for template R2
+        # candidates and apply_reaction's secondary reactant lookup.
+        all_manager = ReactionManager(templates, r2_reactants)
         templates_for_mode = all_manager.templates_for_mode(config["reaction_mode"])
-        self.manager = ReactionManager(templates_for_mode, reactants)
-        self.reactant_keys = list(reactants.keys())
+        self.manager = ReactionManager(templates_for_mode, r2_reactants)
+        # ``reactant_keys`` is the *start* list — always from the test pool.
+        # When r2_pool_file == test_file the two pools are the same object
+        # so this preserves the legacy semantics exactly.
+        self.reactant_keys = list(start_reactants.keys())
         self.result_file = Path(
             self.search_cfg.get(
                 "results_file",
@@ -423,6 +461,8 @@ class SearchRunner:
             "max_episode_len": self.max_steps,
             "greedy_mode": self.greedy_mode if self.mode == "greedy_search" else "",
             "results_file": result_file,
+            "start_pool_file": self.start_pool_file,
+            "r2_pool_file": self.r2_pool_file,
         }
 
     def _record_trajectory(self, path_rows: list[SearchStep], initial_qed: float, path_id: int) -> dict:

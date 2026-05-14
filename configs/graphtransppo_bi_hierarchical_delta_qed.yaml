@@ -1,5 +1,5 @@
 project: GenMolRL_Bi
-experiment_name: GraphTransPPO_Bi_Hierarchical
+experiment_name: GraphTransPPO_Bi_Hierarchical_Lookup
 reaction_mode: bi
 # r2_available is the default bi-mode masking (see configs/ppo_bi_*.yaml for
 # the full rationale). Under this mask GraphTransBiPPO uses the pattern-
@@ -48,49 +48,45 @@ graphtransppo_bi:
   # Masking semantics are unchanged from ppo_bi (README's Masking Modes).
   policy_arch: hierarchical
   # r2_arch controls the R2 representation:
-  #   - 'lookup' (legacy): fixed nn.Embedding for the train R2 pool; eval
-  #     forced to draw R2 from the same train pool.
+  #   - 'lookup' (current default): a learned nn.Embedding(num_reactants_train,
+  #     r2_embed_dim) table — one trained vector per R2 SMILES in the
+  #     training pool. The R2 vocabulary is baked at training time; eval
+  #     MUST draw R2 from the same training pool (eval_r2_pool: train,
+  #     enforced by the trainer — lookup + eval_r2_pool: test raises a
+  #     ValueError because the table has no rows for test reactants).
+  #     This is the gr7aa7z6-style configuration: only the trunk (R1)
+  #     encoder distinguishes GraphTransBi-PPO from Bi-PPO, and the R2
+  #     head is bit-comparable to the legacy Bi-PPO baseline. Matched
+  #     by configs/random_search_bi_train_r2_delta_qed.yaml as the random
+  #     floor.
   #   - 'encoder' (mid-tier): R2 keys = MLP(morgan_fp(R2_SMILES)).
   #     Asymmetric two-tower (R1 = graph, R2 = fingerprint), shared
-  #     across pools.
-  #   - 'encoder_graph' (Option 3, current default): Siamese R2
-  #     GraphTransformer + linear projection. BOTH towers are
-  #     graph-encoded; R2 input is the molecular graph, not a
-  #     fingerprint. Same pool-swap discipline as 'encoder' (rollout /
-  #     PPO update on the train pool, evaluate() on the test pool).
-  #     The R2 backbone is a SEPARATE GraphTransformer from the R1
-  #     trunk — no weight tying — so each tower can be sized
-  #     independently to balance modelling power against compute.
-  r2_arch: encoder_graph
+  #     across pools. Compatible with eval_r2_pool: test.
+  #   - 'encoder_graph' (Option 3): Siamese R2 GraphTransformer + linear
+  #     projection. BOTH towers graph-encoded; the R2 backbone is a
+  #     SEPARATE GraphTransformer from the R1 trunk. Compatible with
+  #     eval_r2_pool: test. The r2_num_emb / r2_num_layers /
+  #     r2_num_heads / r2_keys_refresh_minibatches knobs below
+  #     are commented out because they're encoder_graph-only — uncomment
+  #     when flipping r2_arch back.
+  r2_arch: lookup
   # eval_r2_pool: see configs/ppo_bi_hierarchical_delta_qed.yaml for the
-  # full compatibility matrix. Default "test" (strict test-only R2 at
-  # eval). Flip to "train" for apples-to-apples comparison against the
-  # lookup / gr7aa7z6 baseline. Lookup + test → ValueError.
-  eval_r2_pool: test
+  # full compatibility matrix. Forced to "train" here because r2_arch is
+  # lookup — the embedding table has no rows for test reactants.
+  eval_r2_pool: train
   # GraphTransformer backbone for R1 (same defaults as graphtransrl /
   # graphtransppo so the R1 trunk is bit-comparable across the three
   # graph algorithms). The pooled R1 trunk feature dim is 2 * num_emb = 128.
   num_emb: 64
   num_layers: 3
   num_heads: 2
-  # GraphTransformer backbone for R2 (Option 3). The R2 pool is re-encoded
-  # over ~116k candidate graphs during the PPO update, so the R2 side is
-  # intentionally SMALLER than R1 to keep wall-clock cost manageable.
-  # The pooled R2 graph feature width is 2 * r2_num_emb = 64, then
-  # projected to r2_embed_dim=64 via a single Linear before the
-  # dot-product head.
-  r2_num_emb: 32
-  r2_num_layers: 1
-  r2_num_heads: 2
-  # r2_keys refresh cadence (encoder_graph only). PPO minibatches between
-  # full-pool R2 encodings *with gradients*. Bigger value → cheaper
-  # wall-clock (fewer Siamese-R2 forwards per update) but sparser
-  # gradient signal into the R2 backbone. Default 8 ≈ "twice per PPO
-  # epoch" at the standard 32-minibatches-per-epoch setting. Set to 1
-  # for per-minibatch gradient flow (slowest, most accurate); set to
-  # n_epochs * minibatches_per_epoch for "once per update cycle"
-  # (fastest, sparsest gradient).
-  r2_keys_refresh_minibatches: 8
+  # GraphTransformer backbone for R2 (encoder_graph only — DORMANT under
+  # r2_arch: lookup). Uncomment when flipping r2_arch to encoder_graph
+  # and flipping eval_r2_pool to test.
+  # r2_num_emb: 32
+  # r2_num_layers: 1
+  # r2_num_heads: 2
+  # r2_keys_refresh_minibatches: 8
   # PPO knobs: identical to configs/ppo_bi_hierarchical_delta_qed.yaml so
   # any Bi-PPO-vs-Bi-GraphTransPPO delta is attributable to the encoder.
   # ent_coef 0.01 (vs. 0.0 for the SB3-MaskablePPO Bi path) is a touch
