@@ -1,14 +1,12 @@
 #!/bin/bash
 #!
-#! SLURM job script for GenMolRL Bi-GraphTransPPO Hierarchical with
-#! r2_arch: lookup (configs/graphtransppo_bi_hierarchical_delta_qed.yaml).
-#! For encoder_graph_shared use
-#! slurm_genmolrl_gpu_graphtransppo_hierarchical_encoder_graph_shared.
-#! Pair: slurm_genmolrl_gpu_graphtransppo_multidiscrete.
+#! SLURM job script for GenMolRL Bi-PPO Hierarchical with **R2 lookup**
+#! (run_genmolrl_ppo_bi_hierarchical_lookup.sh). Uses
+#! configs/ppo_bi_hierarchical_lookup_delta_qed.yaml by default:
+#! r2_arch: lookup, eval_r2_pool: train — matched random baseline:
+#! slurm_genmolrl_gpu_random_search_train_r2.
 #!
-#! The GraphTransformer trunk needs ~2-3x the per-step compute of the
-#! Bi-PPO Morgan-MLP trunk; ampere GPU partition is recommended so the
-#! 1M-timestep budget fits in 36h wallclock.
+#! Pair: slurm_genmolrl_gpu_ppo_hierarchical (encoder R2 + eval_r2_pool: test).
 #!
 
 #!#############################################################
@@ -17,7 +15,7 @@
 
 #! sbatch directives begin here ###############################
 #! Name of the job:
-#SBATCH -J genmolrl_graphppo_bi_hier
+#SBATCH -J genmolrl_ppo_bi_hier_lookup
 #! Which project should be charged (NB Wilkes2 projects end in '-GPU'):
 #SBATCH -A OZTIRELI-SL2-GPU
 #SBATCH --nodes=1
@@ -29,13 +27,13 @@
 
 #SBATCH -p ampere
 
-##SBATCH -o logs/graphtransppo_bi_hier_%j.out
-##SBATCH -e logs/graphtransppo_bi_hier_%j.err
+##SBATCH -o logs/ppo_bi_hier_lookup_%j.out
+##SBATCH -e logs/ppo_bi_hier_lookup_%j.err
 
 #! sbatch directives end here #################################
 
 #! Optional overrides: CONDA_ENV, REACTION_MODE, MASKING, REWARD, CONFIG, EXPERIMENT_NAME
-#! Submit: cd /home/bz317/rds/hpc-work/GenMolRL/GenMolRL && sbatch run_launcher/HPC_scripts/bi/slurm_genmolrl_gpu_graphtransppo_hierarchical
+#! Submit: cd /path/to/GenMolRL && sbatch run_launcher/HPC_scripts/bi/slurm_genmolrl_gpu_ppo_hierarchical_lookup
 
 numnodes=$SLURM_JOB_NUM_NODES
 numtasks=$SLURM_NTASKS
@@ -50,13 +48,7 @@ source "${CONDA_ROOT}/etc/profile.d/conda.sh"
 CONDA_ENV="${CONDA_ENV:-RL_for_new_mol}"
 conda activate "${CONDA_ENV}"
 
-#! Resolve the project root (the directory holding `genmolrl/`, `configs/`,
-#! `data/`, `runs/`, `run_launcher/`, ...). The fallback chain handles the
-#! cases where sbatch is invoked from the project root, from
-#! `${PROJECT_ROOT}/run_launcher`, from the directory holding this file
-#! itself, or two levels deeper. The last fallback is the hardcoded
-#! absolute path so the script still works under a stray sbatch.
-LAUNCHER_REL="run_launcher/HPC_sh_files/run_genmolrl_graphtransppo_bi_hierarchical.sh"
+LAUNCHER_REL="run_launcher/HPC_sh_files/run_genmolrl_ppo_bi_hierarchical_lookup.sh"
 for _cand in "${SLURM_SUBMIT_DIR}" "${SLURM_SUBMIT_DIR}/.." "${SLURM_SUBMIT_DIR}/../.." "${SLURM_SUBMIT_DIR}/../../.." "/home/bz317/rds/hpc-work/GenMolRL/GenMolRL"; do
   if [ -f "${_cand}/${LAUNCHER_REL}" ]; then
     PROJECT_ROOT="$(cd "${_cand}" && pwd)"
@@ -73,14 +65,10 @@ cd "${PROJECT_ROOT}"
 mkdir -p logs
 JOBID=$SLURM_JOB_ID
 
-# The YAML config in $LAUNCHER_PATH owns `experiment_name`. We only export
-# `WANDB_RUN_POST_APPEND` so `run_experiment.py` tags the run name with a
-# `_HPC` suffix (or whatever the user provided). The launcher itself never
-# hardcodes EXPERIMENT_NAME, so the YAML stays the source of truth.
 export WANDB_RUN_POST_APPEND="${WANDB_RUN_POST_APPEND:-HPC}"
 
 CMD="bash \"${LAUNCHER_PATH}\""
-CMD="$CMD 2>&1 | tee logs/graphtransppo_bi_hier_${JOBID}.log"
+CMD="$CMD 2>&1 | tee logs/ppo_bi_hier_lookup_${JOBID}.log"
 
 echo -e "JobID: $JOBID\n======"
 echo "Time: $(date)"

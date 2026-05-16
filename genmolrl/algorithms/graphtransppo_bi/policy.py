@@ -9,7 +9,7 @@ the current molecule R1 changes, from a 1024-d Morgan fingerprint passed
 through an MLP to the molecular graph passed through a
 ``GraphTransformer``.
 
-The R2 side supports three architectures:
+The R2 side supports four architectures:
 
   - ``r2_arch='lookup'`` (legacy default): a learned
     ``nn.Embedding(num_reactants, r2_embed_dim)`` lookup table. The R2
@@ -20,17 +20,26 @@ The R2 side supports three architectures:
     between rollout and evaluation. The R1 side stays graph-based; only
     the R2 side stays fingerprint-based — the asymmetric "two-tower
     retrieval" variant that ``ppo_bi`` already uses.
-  - ``r2_arch='encoder_graph'`` (Option 3 upgrade, current default in
-    graphtransppo_bi YAMLs): a *Siamese* GraphTransformer over the R2
-    molecular graph followed by a small projection to ``r2_embed_dim``.
-    The R2 backbone is structurally identical to the R1 backbone (same
-    GraphTransformer hyper-parameters can be reused; defaults are
-    tuned smaller to keep the per-step cost manageable). The pool can
-    still be swapped train ↔ test between rollout and eval; what
-    changes is the input modality — instead of a fingerprint tensor
-    we pass a torch_geometric ``Batch`` of R2 graphs. This is the
-    only architecture where BOTH sides of the retrieval head are
-    graph-encoded with learned parameters.
+  - ``r2_arch='encoder_graph'`` (Option 3 upgrade): a **two-tower**
+    GraphTransformer for the R2 graph followed by a small projection to
+    ``r2_embed_dim``. The R2 backbone has the same architecture *family*
+    as the R1 backbone but **independent weights** (defaults are tuned
+    smaller — ``r2_num_emb=32``, 1 layer — to keep the per-PPO-minibatch
+    cost manageable over the ~116k candidate pool).
+  - ``r2_arch='encoder_graph_shared'`` (true Siamese / weight-tied):
+    R2 is encoded by the **same** ``GraphTransformer`` module instance
+    as R1 (``self.backbone``). Only one linear projection
+    (``2 * num_emb → r2_embed_dim``) is allocated on top. The shared
+    encoder receives gradient signal from every R1 forward (template /
+    value / R2-query heads) **and** every R2 pool encoding, so it
+    learns faster and the R1/R2 dot-product head sees comparably
+    encoded vectors. Per-PPO-minibatch pool-encoding cost is higher
+    than ``encoder_graph`` (the R1 backbone is bigger than the default
+    R2 backbone), so the trainer's existing
+    ``r2_keys_refresh_minibatches`` caching applies here too. The
+    ``r2_num_emb`` / ``r2_num_layers`` / ``r2_num_heads`` knobs are
+    **ignored** under this arch because the architecture is fixed to
+    the R1 backbone — set them under ``encoder_graph`` instead.
 
 Both ``conditional_r2={True, False}`` are supported via the same flag as
 ``BiPolicy``:
@@ -99,9 +108,11 @@ class GraphTransBiPolicy(nn.Module):
             consumed by the R2 head; ignored when ``conditional_r2=False``.
         r2_embed_dim: dimension of the R2 query target vectors.
         r2_arch: ``'lookup'`` (legacy ``nn.Embedding``), ``'encoder'``
-            (Morgan-FP MLP → r2_embed_dim, vocabulary-free), or
-            ``'encoder_graph'`` (Siamese R2 GraphTransformer +
-            projection, Option 3 upgrade — current default).
+            (Morgan-FP MLP → r2_embed_dim, vocabulary-free),
+            ``'encoder_graph'`` (two-tower R2 GraphTransformer with
+            **independent** weights + projection — Option 3 upgrade),
+            or ``'encoder_graph_shared'`` (true Siamese: R2 reuses
+            ``self.backbone`` and only adds a projection).
         r2_encoder_hidden: hidden width of the R2 encoder MLP. Only used
             when ``r2_arch='encoder'``; defaults to ``r2_fp_dim // 2``.
         r2_fp_dim: input fingerprint dim for the R2 encoder MLP.
@@ -147,10 +158,10 @@ class GraphTransBiPolicy(nn.Module):
         self.r2_embed_dim = int(r2_embed_dim)
 
         self.r2_arch = str(r2_arch).lower()
-        if self.r2_arch not in {"lookup", "encoder", "encoder_graph"}:
+        if self.r2_arch not in {"lookup", "encoder", "encoder_graph", "encoder_graph_shared"}:
             raise ValueError(
-                f"r2_arch must be 'lookup', 'encoder', or 'encoder_graph', "
-                f"got {self.r2_arch!r}"
+                f"r2_arch must be 'lookup', 'encoder', 'encoder_graph', or "
+                f"'encoder_graph_shared', got {self.r2_arch!r}"
             )
 
         spec = GraphFeatureSpec()
@@ -190,11 +201,13 @@ class GraphTransBiPolicy(nn.Module):
                 n_layers=2,
             )
 
-        # R2 encoder: three mutually-exclusive variants matching the three
+        # R2 encoder: four mutually-exclusive variants matching the four
         # supported r2_arch values. The same ``encode_r2_pool`` API hides the
         # variation from the trainer; only the input data type differs (none /
         # tensor / Batch). Attributes that don't apply to the active arch are
-        # set to None to keep the checkpoint key set obvious.
+        # set to None to keep the checkpoint key set obvious. Under
+        # ``encoder_graph_shared`` only ``self.r2_project`` is added — the
+        # R2 encoder is ``self.backbone`` itself (weight-tied).
         self.r2_embed = None
         self.r2_encoder = None
         self.r2_backbone = None
@@ -213,11 +226,10 @@ class GraphTransBiPolicy(nn.Module):
             self.r2_encoder = _mlp(
                 self.r2_fp_dim, r2_hidden, r2_embed_dim, n_layers=2
             )
-        else:
-            # ``encoder_graph``: Siamese R2 GraphTransformer + linear
-            # projection. Same architecture family as the R1 backbone but
-            # with separate weights — there is no obvious gain from tying
-            # them and disentangling lets us shrink the R2 side aggressively
+        elif self.r2_arch == "encoder_graph":
+            # Two-tower R2 GraphTransformer + linear projection. Same
+            # architecture family as the R1 backbone but with **independent**
+            # weights — disentangling lets us shrink the R2 side aggressively
             # (defaults: 1 layer, num_emb=32) to keep the per-PPO-minibatch
             # pool-encoding cost manageable. The pooled graph feature has
             # width ``2 * r2_num_emb`` (atoms via global_mean_pool + the
@@ -234,6 +246,19 @@ class GraphTransBiPolicy(nn.Module):
                 num_heads=int(r2_num_heads),
             )
             self.r2_project = nn.Linear(self.r2_num_emb * 2, r2_embed_dim)
+        else:
+            # ``encoder_graph_shared``: true Siamese / weight-tied. R2 is
+            # encoded by the **same** ``self.backbone`` module that encodes
+            # R1, so the encoder learns from gradient signal flowing in
+            # from both sides of the retrieval head. Only a single linear
+            # projection ``2 * num_emb → r2_embed_dim`` is allocated on top
+            # so the dot-product head sees a consistent key dimension.
+            # The R1 backbone here is the bigger ``num_emb=64`` / 3-layer
+            # default, which gives R2 a much stronger encoder for free at
+            # the cost of a more expensive per-PPO-minibatch pool forward
+            # — but the trainer's ``r2_keys_refresh_minibatches`` caching
+            # already exists to amortise that.
+            self.r2_project = nn.Linear(graph_dim, r2_embed_dim)
 
     # ------------------------------------------------------------------
     # Encoder + heads
@@ -262,7 +287,7 @@ class GraphTransBiPolicy(nn.Module):
     def encode_r2_pool(self, r2_pool_data) -> torch.Tensor:
         """Return ``r2_keys`` of shape ``(N_pool, r2_embed_dim)`` for the active pool.
 
-        Generalises :meth:`BiPolicy.encode_r2_pool` to three encoder
+        Generalises :meth:`BiPolicy.encode_r2_pool` to four encoder
         variants — the trainer passes a different ``r2_pool_data`` type
         for each arch and this method dispatches on ``self.r2_arch``:
 
@@ -272,13 +297,18 @@ class GraphTransBiPolicy(nn.Module):
           ``(N_pool, r2_fp_dim)`` Morgan-FP tensor and applies the R2 MLP.
         - ``r2_arch='encoder_graph'``: expects ``r2_pool_data`` to be a
           ``torch_geometric.data.Batch`` of R2 molecular graphs, runs the
-          R2 GraphTransformer + linear projection. ``cond`` is an
-          all-ones placeholder matching the R1 convention; could later
-          carry pool-side context (e.g. R2 cluster id) the same way R1
-          could carry episode-step depth.
+          INDEPENDENT-weights R2 GraphTransformer + linear projection.
+          ``cond`` is an all-ones placeholder matching the R1
+          convention; could later carry pool-side context (e.g. R2
+          cluster id) the same way R1 could carry episode-step depth.
+        - ``r2_arch='encoder_graph_shared'``: same input type as
+          ``encoder_graph``, but the R2 GraphTransformer IS
+          ``self.backbone`` (weight-tied to the R1 encoder), followed
+          by ``self.r2_project``.
 
-        The output is differentiable in both encoder modes so PPO
-        gradients flow into the active R2 encoder.
+        The output is differentiable in all three encoder modes so PPO
+        gradients flow into whichever module is acting as the R2
+        encoder.
         """
         if self.r2_arch == "lookup":
             return self.r2_embed.weight
@@ -288,10 +318,11 @@ class GraphTransBiPolicy(nn.Module):
             )
         if self.r2_arch == "encoder":
             return self.r2_encoder(r2_pool_data)
-        # encoder_graph: r2_pool_data is a torch_geometric Batch of R2 graphs.
+        # encoder_graph[_shared]: r2_pool_data is a torch_geometric Batch.
         n_graphs = int(r2_pool_data.num_graphs)
         cond = torch.ones((n_graphs, 1), device=r2_pool_data.x.device)
-        _, graph_embeds = self.r2_backbone(r2_pool_data, cond)
+        backbone = self.r2_backbone if self.r2_arch == "encoder_graph" else self.backbone
+        _, graph_embeds = backbone(r2_pool_data, cond)
         return self.r2_project(graph_embeds)
 
     def r2_logits(

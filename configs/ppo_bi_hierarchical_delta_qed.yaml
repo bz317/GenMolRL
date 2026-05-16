@@ -24,7 +24,7 @@ env:
   algorithm_family: ppo_bi_hierarchical
   use_stop_action: true
   stop_early_penalty: -0.05
-  stop_penalty_until_step: 3
+  stop_penalty_until_step: 4
   invalid_reaction_penalty: -1.0
   reward_round_digits: 3
   info_qed_round_digits: 3

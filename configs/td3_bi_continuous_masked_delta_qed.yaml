@@ -1,0 +1,159 @@
+# =============================================================================
+# TD3 | BI templates | CONTINUOUS PGFS-style action space (PGFS-faithful)
+# -----------------------------------------------------------------------------
+# This config aims for an "exactly PGFS" Bi-TD3 setup (Pereira et al., 2021,
+# Figure 2 + Algorithm 1) with three explicit, user-allowed deviations:
+#
+#   (1) Reward = ΔQED of the produced molecule (env-side), not QED of the
+#       final molecule at the end of the rollout. Used both as the env reward
+#       and as the kNN product-scoring function (see td3.knn_score_mode).
+#   (2) During training, R(1) is drawn uniformly at random from the training
+#       reactant pool each episode (start_strategy: random_pool).
+#   (3) During evaluation, the env iterates the test reactant pool one
+#       molecule at a time so every test R(1) is rolled out exactly once
+#       (handled by the env eval mode used by all GenMolRL methods).
+#
+# Everything else here matches PGFS Algorithm 1 line-by-line:
+#   • No Stop action (PGFS episodes always run max_episode_len steps).
+#   • State to f_net is the raw Morgan FP of R(1) — the per-step action mask
+#     is *not* appended to the observation.
+#   • f_net + π_net joint actor (lines 15-18) with hard Gumbel-Softmax over
+#     masked template logits; π_net emits a continuous fingerprint-shaped R(2).
+#   • Auxiliary cross-entropy supervision on f_net using the stored T_i as
+#     targets (Algorithm 1 line 21), in addition to the DPG term.
+#   • Target actor uses the same Gumbel-Softmax procedure as the online
+#     actor (Algorithm 1 line 17); clipped Gaussian smoothing on the R(2)
+#     head is standard TD3 target policy smoothing.
+#   • Twin critics, min target Q, delayed policy updates (TD3 standard).
+#   • Environment-side k-NN: for each top-k closest R(2) candidate, run the
+#     forward reaction and argmax the resulting product's ΔQED (Algorithm 1
+#     lines 12-14). No ε-greedy random pick.
+#   • No epsilon-greedy template exploration on top of Gumbel — temperature
+#     decay alone provides the exploration schedule.
+# =============================================================================
+project: GenMolRL_Bi
+experiment_name: TD3_Bi_Continuous_PGFS
+reaction_mode: bi
+# Template feasibility mask used by f_net's masked softmax. PGFS Algorithm 1
+# line 11 (``T_i, a_i ← Actor(R(1)_i)``) and Figure 2 do NOT mask the template
+# softmax — the actor freely samples any template and infeasible (state, T)
+# picks are punished via ``invalid_reaction_penalty`` (-1). The PGFS-faithful
+# default for Bi-TD3 is therefore ``masking: none`` — ``ReactionManager.get_mask``
+# returns an all-ones vector and f_net's masked-softmax degenerates to plain
+# softmax. The KNN wrapper still uses ``reaction_manager.get_valid_reactants(T)``
+# to source R(2) candidates (pool-side filtering, which PGFS does have via
+# ``pool_R(2)``) — that's R(2) candidacy, not a state-conditional template mask.
+#
+# Other modes are kept as documented opt-ins (do NOT use for PGFS fidelity):
+#   - r2_available: pattern-only template mask (template is feasible at s iff
+#     R(1) matches and ≥1 R(2) pattern-matches in the pool). Matches PPO-Bi's
+#     default. Useful if you want faster learning by pruning hopeless picks
+#     from the actor's distribution, at the cost of departing from PGFS.
+#   - reaction_valid: per-(state, T) RDKit-validated R(2) mask. Zero -1
+#     rewards by construction; ~116k RDKit calls per (state, T) so slow.
+#   - substructure: template SMARTS match against R(1) only, ignoring R(2)
+#     availability. Cheapest pattern-only mask.
+masking: none
+reward: delta_qed
+max_episode_len: 5
+dataset:
+  training_file: data/Bi/reactants_train.pkl
+  test_file: data/Bi/reactants_test.pkl
+  templates_file: data/Bi/templates.pkl
+  # Allowed deviation (2): R(1) sampled uniformly at random from the loaded
+  # reactant pool each training episode. At eval the env switches to
+  # ``cycle_pool`` and iterates the test pool one molecule at a time
+  # (allowed deviation 3).
+  start_strategy: random_pool
+  # R(2) candidate pool the env's ReactionManager / KNN FAISS index is built
+  # on. Unlike PPO-Bi there is no ``r2_arch: lookup`` alternative — TD3-Bi
+  # always uses the FAISS-over-Morgan-FP encoder, so the only knob is which
+  # *reactant pool* the env owns:
+  #   - eval_r2_pool: test  → eval env loads ``test_file`` → R(2) drawn from
+  #     the disjoint bi-test reactants. R(1) iterates the test pool. This is
+  #     the PGFS-faithful default (pool_R(2) is an env-side data structure
+  #     swapped at test time) and matches PPO-Bi's
+  #     ``r2_arch=encoder + eval_r2_pool=test`` for apples-to-apples
+  #     comparison against `vbhzhufk` / `i1e1d6yt`.
+  #   - eval_r2_pool: train → eval env loads ``training_file`` as the R(2)
+  #     pool but iterates ``test_file`` for R(1) via ``start_pool_file``.
+  #     Use this only to compare against PPO-Bi ``r2_arch=lookup`` /
+  #     ``eval_r2_pool=train`` baselines (e.g. `gr7aa7z6`).
+  # Training-env behaviour is identical for both values: env.reactants =
+  # train pool → R(1) and R(2) both from bi-train reactants (~116k).
+  eval_r2_pool: train
+env:
+  algorithm_family: td3_pgfs
+  action_design: pgfs_continuous_r2
+  # PGFS Figure 2 / Algorithm 1 has no Stop action. Episodes always run
+  # max_episode_len steps. Disable Stop and any stop penalty.
+  use_stop_action: false
+  stop_early_penalty: 0.0
+  stop_penalty_until_step: -1
+  invalid_reaction_penalty: -1.0
+  # PGFS Figure 2: f_net takes the raw Morgan fingerprint of R(1) as input.
+  # The TD3 trainer's PPO/A2C-style "append action mask to obs" extension is
+  # NOT part of PGFS — disable here. Other configs that don't set this key
+  # still default to True (via _make_td3_env) so Uni-TD3 is unaffected.
+  append_action_mask_to_obs: false
+training:
+  seed: 42
+  total_timesteps: 1000000
+  # PGFS uses a short purely-random warm-up to seed the buffer before the
+  # actor/critic come online. 10k transitions matches the paper's order of
+  # magnitude and is small enough that the actor sees its own consequences
+  # quickly after activation.
+  start_timesteps: 10000
+  eval_freq: 10000
+  n_envs: 1
+td3:
+  actor_lr: 0.0001
+  critic_lr: 0.0003
+  gamma: 0.99
+  tau: 0.005
+  batch_size: 64
+  # 1M is the PGFS default; large enough that the warm-up bias washes out
+  # within a few hundred thousand post-warmup steps.
+  buffer_size: 1000000
+  policy_freq: 2
+  policy_noise: 0.2
+  noise_std: 0.1
+  noise_clip: 0.2
+  # Gumbel-Softmax temperature schedule. τ starts at 1.0 and decays toward
+  # 0.25 over training so the early policy is genuinely stochastic and the
+  # late policy is near-discrete.
+  initial_temperature: 1.0
+  min_temperature: 0.25
+  # ----- PGFS-faithful additions (gated knobs, default-off elsewhere) -----
+  # PGFS Algorithm 1 line 21: cross-entropy supervision on f_net using the
+  # stored template indices T_i as targets. Set to 1.0 to match the paper.
+  # Default 0.0 in agent.py keeps existing TD3 runs bit-equivalent.
+  f_ce_loss_coef: 1.0
+  # PGFS Algorithm 1 line 17: target actor uses the same Gumbel-Softmax
+  # procedure as the online actor (not argmax). Default False in agent.py.
+  symmetric_target_actor: true
+  # PGFS Algorithm 1 lines 12-14: forward-react each top-k R(2) candidate
+  # and argmax the resulting product's reward (here ΔQED, allowed deviation
+  # (1)). Default in knn.py is the legacy reactant-distance surrogate.
+  knn_score_mode: product
+  # PGFS uses a hard argmax over the scored products — no ε-greedy random
+  # pick. The default in knn.py is 0.3 to preserve the original surrogate.
+  knn_random_epsilon: 0.0
+  knn_top_k: 5
+  # ----- End PGFS-faithful additions -------------------------------------
+  # PGFS does not use ε-greedy template exploration on top of Gumbel —
+  # temperature decay alone provides the exploration schedule. Keep these
+  # at 0 to match the paper.
+  training_random_action_prob: 0.0
+  training_random_action_min_prob: 0.0
+  training_random_action_decay_steps: 0
+  # PGFS has no Stop action; warm-up never picks Stop.
+  warmup_stop_probability: 0.0
+  # PGFS uses the deterministic TD3 update with auxiliary CE on f_net, not
+  # entropy-regularized SAC-discrete. Keep this off.
+  entropy_regularization: false
+  auto_tune_alpha: false
+  save_replay_buffer_in_checkpoints: false
+callbacks:
+  model_save_freq: 100000
+  gradient_save_freq: 100

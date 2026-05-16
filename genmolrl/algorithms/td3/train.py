@@ -56,11 +56,28 @@ def _make_td3_env(config: dict, *, eval_env: bool = False):
     # already get. The continuous R2 head still emits a 1024-dim fingerprint
     # vector (see ``_td3_fp_dim``) so this change does not affect the R2
     # storage / KNN logic for bi reactions.
-    kwargs["append_action_mask_to_obs"] = True
+    #
+    # The Bi-TD3 PGFS-faithful config opts out (``env.append_action_mask_to_obs: false``)
+    # because PGFS Figure 2 feeds f_net the raw Morgan FP of R(1) only. The default
+    # here remains True so existing Uni-TD3 runs are bit-equivalent.
+    if kwargs.get("append_action_mask_to_obs") is None:
+        kwargs["append_action_mask_to_obs"] = True
     env = gym.make(ENV_ID, **kwargs)
     if getattr(env.unwrapped, "action_design", "") == TD3_UNI_DISCRETE_ACTION_DESIGN:
         return env
-    return KNNWrapper(env)
+
+    # KNN selection knobs (PGFS Algorithm 1 lines 12-14). Defaults preserve the
+    # legacy reactant-distance surrogate (``QED(R2) - L2(a, R2)`` + ε-greedy).
+    # The PGFS-faithful Bi-TD3 config sets ``td3.knn_score_mode: product`` and
+    # ``td3.knn_random_epsilon: 0.0`` so the wrapper forward-reacts each top-k
+    # R(2) candidate and argmaxes the product's reward.
+    td3_cfg = config.get("td3", {}) or {}
+    return KNNWrapper(
+        env,
+        score_mode=str(td3_cfg.get("knn_score_mode", "reactant_distance")),
+        random_epsilon=float(td3_cfg.get("knn_random_epsilon", 0.3)),
+        top_k=int(td3_cfg.get("knn_top_k", 5)),
+    )
 
 
 def _to_r2_tensor(env, r2):
@@ -224,6 +241,15 @@ def train(config: dict, experiment_name: str):
     _ratio_cfg = td3_cfg.get("target_entropy_ratio", None)
     target_entropy_ratio = None if _ratio_cfg is None else float(_ratio_cfg)
     alpha_lr = float(td3_cfg.get("alpha_lr", 3e-4))
+    # PGFS Algorithm 1 line 21 — auxiliary cross-entropy on f_net using stored
+    # template indices. Default 0.0 keeps existing TD3 / Uni-TD3 runs untouched;
+    # the PGFS-faithful Bi-TD3 config sets ``td3.f_ce_loss_coef: 1.0``.
+    f_ce_loss_coef = float(td3_cfg.get("f_ce_loss_coef", 0.0))
+    # PGFS Algorithm 1 line 17 — target actor uses the same Gumbel-Softmax
+    # procedure as the online actor. Default False keeps the TD3-standard
+    # deterministic-argmax target action; the PGFS-faithful Bi-TD3 config opts
+    # in with ``td3.symmetric_target_actor: true``.
+    symmetric_target_actor = bool(td3_cfg.get("symmetric_target_actor", False))
 
     agent = TD3Agent(
         env,
@@ -246,6 +272,8 @@ def train(config: dict, experiment_name: str):
         target_entropy=target_entropy,
         target_entropy_ratio=target_entropy_ratio,
         alpha_lr=alpha_lr,
+        f_ce_loss_coef=f_ce_loss_coef,
+        symmetric_target_actor=symmetric_target_actor,
     )
     replay_buffer = ReplayBuffer(
         env.unwrapped.observation_space.shape[0],

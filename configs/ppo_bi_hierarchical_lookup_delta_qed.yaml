@@ -20,7 +20,7 @@ env:
   reward_round_digits: 3
   info_qed_round_digits: 3
 training:
-  seed: 42
+  seed: 123456
   total_timesteps: 1000000
   eval_freq: 10000
   save_freq: 100000

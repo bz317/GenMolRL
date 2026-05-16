@@ -47,6 +47,8 @@ class TD3Agent:
         target_entropy: float = 0.5,
         target_entropy_ratio: float | None = None,
         alpha_lr: float = 3e-4,
+        f_ce_loss_coef: float = 0.0,
+        symmetric_target_actor: bool = False,
     ):
         self.env = env
         # ``state_dim`` is the size of what the actor / critic *see* as an
@@ -141,6 +143,21 @@ class TD3Agent:
             self.log_alpha = None
             self.alpha_optimizer = None
 
+        # PGFS Algorithm 1 line 21 — auxiliary cross-entropy supervision on the
+        # template head f_net using the stored action's template index as the
+        # target. ``L(θ^f) = -Σ T_i · log softmax(f(R(1)_i))``. Adds to the
+        # actor optimizer step (so f_net receives both the DPG gradient via the
+        # straight-through Gumbel and the CE imitation gradient). Default 0.0
+        # keeps existing TD3 / Uni-TD3 runs bit-equivalent; the Bi-TD3 PGFS
+        # config sets ``td3.f_ce_loss_coef: 1.0``.
+        self.f_ce_loss_coef = float(f_ce_loss_coef)
+        # PGFS Algorithm 1 line 17 — target actor uses the same Gumbel-Softmax
+        # procedure as the online actor (not argmax). Defaults to False
+        # (TD3-standard deterministic target action) so existing TD3 runs
+        # behave identically; the Bi-TD3 PGFS config opts in with
+        # ``td3.symmetric_target_actor: true``.
+        self.symmetric_target_actor = bool(symmetric_target_actor)
+
     def _template_mask_info(self, smiles_batch):
         rm = self.env.unwrapped.reaction_manager
         mask_kind = td3_template_mask_kind(self.env, override=self._template_mask_kind_override)
@@ -233,10 +250,16 @@ class TD3Agent:
         next_masks_info = self._template_mask_info(next_state_smiles)
 
         with torch.no_grad():
-            # Deterministic target actions + clipped Gaussian noise on the continuous R2 head only
-            # (standard TD3). Stochastic Gumbel templates here inject biased, high-variance targets.
+            # By default the target actor uses argmax over masked logits
+            # (TD3-standard deterministic target action). When
+            # ``symmetric_target_actor`` is True we use the same
+            # Gumbel-Softmax procedure as the online actor — that is the
+            # PGFS Algorithm 1 line 17 convention (target actor mirrors
+            # actor). Clipped Gaussian noise on the continuous R2 head is
+            # applied below either way (TD3 target policy smoothing).
+            target_evaluate = not self.symmetric_target_actor
             next_templates, next_r2_vectors = self.actor_target(
-                next_state_obs, next_masks_info, self.temperature, evaluate=True
+                next_state_obs, next_masks_info, self.temperature, evaluate=target_evaluate
             )
             noise = (torch.randn_like(next_r2_vectors) * self.policy_noise).clamp(-self.noise_clip, self.noise_clip)
             _, template_types_next = next_masks_info
@@ -258,9 +281,26 @@ class TD3Agent:
         self.critic_loss.backward()
         self.critic_optimizer.step()
 
+        f_ce_loss_value = 0.0
         if self.total_it % self.policy_freq == 0:
             current_templates, current_r2_vectors = self.actor(state_obs, masks_info, self.temperature)
-            self.actor_loss = -self.critic1(state_obs, current_templates, current_r2_vectors).mean()
+            dpg_loss = -self.critic1(state_obs, current_templates, current_r2_vectors).mean()
+            actor_loss = dpg_loss
+            # PGFS Algorithm 1 line 21: cross-entropy supervision on f_net.
+            # Targets are the template indices that were actually selected at
+            # state s (stored in ``templates`` as one-hot). The same masked
+            # logits the env-side action selection uses are fed to the CE
+            # loss so the gradient never tries to push probability into
+            # masked-out templates.
+            if self.f_ce_loss_coef > 0.0:
+                f_logits = self.actor.f_net(state_obs)
+                mask_tensor, _ = masks_info
+                masked_f_logits = f_logits + (1.0 - mask_tensor) * (-1e9)
+                stored_template_idx = templates.argmax(dim=-1)
+                f_ce_loss = F.cross_entropy(masked_f_logits, stored_template_idx)
+                actor_loss = actor_loss + self.f_ce_loss_coef * f_ce_loss
+                f_ce_loss_value = float(f_ce_loss.detach().item())
+            self.actor_loss = actor_loss
             self.actor_optimizer.zero_grad()
             self.actor_loss.backward()
             self.actor_optimizer.step()
@@ -278,6 +318,8 @@ class TD3Agent:
             "target_q_values": target_q.mean().item(),
             "temperature": self.temperature,
             "entropy_regularization": 0.0,
+            "f_ce_loss": f_ce_loss_value,
+            "f_ce_loss_coef": self.f_ce_loss_coef,
         }
 
     def _train_entropy(self, replay_buffer, batch_size: int) -> dict:

@@ -49,12 +49,18 @@ graphtransppo_bi:
   #     encoder (graph vs Morgan-MLP).
   #   - 'encoder': MLP(morgan_fp(R2_SMILES)) — asymmetric two-tower,
   #     compatible with eval_r2_pool: test.
-  #   - 'encoder_graph': Siamese R2 GraphTransformer + projection.
-  #     Both towers graph-encoded; compatible with eval_r2_pool: test.
-  #     The r2_num_emb / r2_num_layers / r2_num_heads /
-  #     r2_keys_refresh_minibatches knobs below are commented out
-  #     because they're encoder_graph-only — uncomment when flipping
-  #     r2_arch back.
+  #   - 'encoder_graph' (two-tower with INDEPENDENT R2 weights): R2 keys
+  #     come from a SEPARATE R2 GraphTransformer (defaults: num_emb=32,
+  #     1 layer) followed by a projection. Compatible with
+  #     eval_r2_pool: test. The r2_num_emb / r2_num_layers /
+  #     r2_num_heads / r2_keys_refresh_minibatches knobs below are
+  #     commented out because they're encoder_graph-only — uncomment
+  #     when flipping r2_arch back.
+  #   - 'encoder_graph_shared' (true Siamese / weight-tied): R2 reuses
+  #     the SAME R1 GraphTransformer module + a single projection. Try
+  #     this when 'encoder_graph' underperforms — see the hierarchical
+  #     YAML's r2_arch comment for the full motivation. r2_num_emb /
+  #     r2_num_layers / r2_num_heads are IGNORED under this arch.
   r2_arch: lookup
   # eval_r2_pool: see configs/ppo_bi_hierarchical_delta_qed.yaml for the
   # full compatibility matrix. Forced to "train" here because r2_arch is
@@ -67,11 +73,13 @@ graphtransppo_bi:
   num_layers: 3
   num_heads: 2
   # GraphTransformer backbone for R2 (encoder_graph only — DORMANT under
-  # r2_arch: lookup). Uncomment when flipping r2_arch to encoder_graph
-  # and flipping eval_r2_pool to test.
+  # r2_arch: lookup / encoder / encoder_graph_shared). Uncomment when
+  # flipping r2_arch to encoder_graph and flipping eval_r2_pool to test.
   # r2_num_emb: 32
   # r2_num_layers: 1
   # r2_num_heads: 2
+  # r2_keys_refresh_minibatches still applies under encoder_graph_shared
+  # (the shared R1 backbone is run over the full R2 pool every refresh).
   # r2_keys_refresh_minibatches: 8
   learning_rate: 0.0003
   n_steps: 2048

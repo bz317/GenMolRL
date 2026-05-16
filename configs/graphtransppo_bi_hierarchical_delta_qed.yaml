@@ -62,13 +62,33 @@ graphtransppo_bi:
   #   - 'encoder' (mid-tier): R2 keys = MLP(morgan_fp(R2_SMILES)).
   #     Asymmetric two-tower (R1 = graph, R2 = fingerprint), shared
   #     across pools. Compatible with eval_r2_pool: test.
-  #   - 'encoder_graph' (Option 3): Siamese R2 GraphTransformer + linear
-  #     projection. BOTH towers graph-encoded; the R2 backbone is a
-  #     SEPARATE GraphTransformer from the R1 trunk. Compatible with
-  #     eval_r2_pool: test. The r2_num_emb / r2_num_layers /
-  #     r2_num_heads / r2_keys_refresh_minibatches knobs below
-  #     are commented out because they're encoder_graph-only — uncomment
-  #     when flipping r2_arch back.
+  #   - 'encoder_graph' (Option 3, two-tower with INDEPENDENT R2 weights):
+  #     R2 keys = R2_GraphTransformer(R2_graph) → Linear → r2_embed_dim.
+  #     BOTH towers graph-encoded; the R2 backbone is a SEPARATE
+  #     GraphTransformer from the R1 trunk, with its own
+  #     r2_num_emb / r2_num_layers / r2_num_heads (defaulted small to
+  #     keep the per-PPO-minibatch pool-encoding cost manageable over
+  #     ~116k candidates). Compatible with eval_r2_pool: test. The
+  #     r2_num_emb / r2_num_layers / r2_num_heads /
+  #     r2_keys_refresh_minibatches knobs below are commented out
+  #     because they're encoder_graph-only — uncomment when flipping
+  #     r2_arch back.
+  #   - 'encoder_graph_shared' (true Siamese / weight-tied):
+  #     R2 keys = R1_backbone(R2_graph) → Linear → r2_embed_dim. The R2
+  #     side reuses the SAME GraphTransformer module instance that
+  #     encodes R1, so the encoder learns from both R1-side gradient
+  #     (template / value / R2-query heads, every minibatch) AND R2-side
+  #     gradient (PG / value loss through r2_keys, every K minibatches).
+  #     This is the configuration to try when 'encoder_graph' underperforms
+  #     'lookup' on bi-graphtransppo — the suspicion being that a tiny
+  #     independent R2 backbone (num_emb=32, 1 layer) can't learn a
+  #     well-aligned R2 representation, and weight-tying gives R2 the
+  #     full R1 encoder capacity for free with consistent R1/R2 alignment
+  #     in the dot-product space. The r2_num_emb / r2_num_layers /
+  #     r2_num_heads knobs are IGNORED under this arch (the R2 encoder
+  #     architecture is fixed to num_emb / num_layers / num_heads).
+  #     r2_keys_refresh_minibatches still applies. Compatible with
+  #     eval_r2_pool: test.
   r2_arch: lookup
   # eval_r2_pool: see configs/ppo_bi_hierarchical_delta_qed.yaml for the
   # full compatibility matrix. Forced to "train" here because r2_arch is
@@ -81,11 +101,14 @@ graphtransppo_bi:
   num_layers: 3
   num_heads: 2
   # GraphTransformer backbone for R2 (encoder_graph only — DORMANT under
-  # r2_arch: lookup). Uncomment when flipping r2_arch to encoder_graph
-  # and flipping eval_r2_pool to test.
+  # r2_arch: lookup / encoder / encoder_graph_shared). Uncomment when
+  # flipping r2_arch to encoder_graph and flipping eval_r2_pool to test.
   # r2_num_emb: 32
   # r2_num_layers: 1
   # r2_num_heads: 2
+  # r2_keys_refresh_minibatches still applies under encoder_graph_shared
+  # (the shared R1 backbone is run over the full R2 pool every refresh —
+  # see GraphTransBiPPO docstring). Default 8.
   # r2_keys_refresh_minibatches: 8
   # PPO knobs: identical to configs/ppo_bi_hierarchical_delta_qed.yaml so
   # any Bi-PPO-vs-Bi-GraphTransPPO delta is attributable to the encoder.

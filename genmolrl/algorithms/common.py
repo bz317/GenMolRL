@@ -63,7 +63,25 @@ def env_kwargs(config: dict, *, eval_env: bool = False) -> dict:
     # `start_pool_file`. Other families (sb3_discrete, td3_pgfs,
     # graphtransrl, graphtransppo) keep the legacy behaviour where the
     # eval env loads `test_file` directly as its reactant pool.
+    # ``dataset.eval_r2_pool`` selects the R(2) candidate pool the eval env
+    # builds its ReactionManager / FAISS index on. ``test`` (default) swaps
+    # ``reactant_file`` to ``test_file`` at eval time — disjoint test R(2)s,
+    # matches PGFS and PPO-Bi ``eval_r2_pool=test`` (the encoder-style
+    # convention used by all GenMolRL methods). ``train`` keeps the training
+    # reactant pool at eval (apples-to-apples vs PPO-Bi ``eval_r2_pool=train``
+    # / legacy ``r2_arch=lookup`` baselines); R(1) still iterates the test
+    # pool via ``start_pool_file``. ``sb3_multidiscrete`` overrides to
+    # ``train`` regardless because its action head is sized by the training
+    # reactant pool.
+    eval_r2_pool = str(dataset.get("eval_r2_pool", "test")).lower()
+    if eval_r2_pool not in {"test", "train"}:
+        raise ValueError(
+            f"dataset.eval_r2_pool must be 'test' or 'train', got {eval_r2_pool!r}"
+        )
     if eval_env and algorithm_family == "sb3_multidiscrete":
+        reactant_file = dataset["training_file"]
+        start_pool_file = dataset.get("test_file")
+    elif eval_env and eval_r2_pool == "train":
         reactant_file = dataset["training_file"]
         start_pool_file = dataset.get("test_file")
     else:

@@ -312,9 +312,10 @@ class BiPPO:
                 "r2_arch='lookup' is incompatible with eval_r2_pool='test': "
                 "the nn.Embedding(num_reactants, r2_embed_dim) table is sized "
                 "to the TRAINING pool — there are no rows for test reactants. "
-                "Use r2_arch='encoder' or r2_arch='encoder_graph' to evaluate "
-                "on test R2s, or set eval_r2_pool='train' to keep the legacy "
-                "(gr7aa7z6) behaviour where eval draws R2 from the train pool."
+                "Use r2_arch='encoder', 'encoder_graph', or "
+                "'encoder_graph_shared' to evaluate on test R2s, or set "
+                "eval_r2_pool='train' to keep the legacy (gr7aa7z6) "
+                "behaviour where eval draws R2 from the train pool."
             )
 
         # Derive the R2-axis mask source from the masking mode (the README

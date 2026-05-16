@@ -1,0 +1,63 @@
+project: GenMolRL_Bi
+experiment_name: GraphTransPPO_Bi_Hierarchical_EncoderGraphShared
+reaction_mode: bi
+masking: r2_available
+reward: delta_qed
+max_episode_len: 5
+dataset:
+  training_file: data/Bi/reactants_train.pkl
+  test_file: data/Bi/reactants_test.pkl
+  templates_file: data/Bi/templates.pkl
+  start_strategy: random_pool
+env:
+  algorithm_family: graphtransppo_bi_hierarchical_encoder_graph_shared
+  use_stop_action: true
+  stop_early_penalty: -0.05
+  stop_penalty_until_step: 3
+  invalid_reaction_penalty: -1.0
+  reward_round_digits: 3
+  info_qed_round_digits: 3
+training:
+  seed: 42
+  total_timesteps: 1000000
+  eval_freq: 10000
+  save_freq: 100000
+graphtransppo_bi:
+  policy_arch: hierarchical
+  # Weight-tied Siamese R2: R2 keys = R1_backbone(R2_graph) → Linear.
+  # The SAME GraphTransformer (num_emb / num_layers / num_heads below)
+  # encodes R1 at rollout time and the full train R2 pool during PPO
+  # refresh steps. NOT lookup — see configs/graphtransppo_bi_hierarchical_delta_qed.yaml
+  # (or ppo_bi_hierarchical_lookup) for the gr7aa7z6-style nn.Embedding head.
+  #
+  # WARNING (akcv76so OOM): a single forward over ~116k R2 graphs through
+  # the 3-layer backbone can require ~4 GiB extra on an A100. If this
+  # config OOMs, use lookup / encoder, reduce num_layers, or add chunked
+  # encode_r2_pool in code before resubmitting.
+  r2_arch: encoder_graph_shared
+  eval_r2_pool: train
+  num_emb: 64
+  num_layers: 3
+  num_heads: 2
+  # How often to re-encode the full R2 pool WITH grad during each PPO update
+  # (intermediate minibatches reuse a detached cache). Higher → fewer peaks.
+  r2_keys_refresh_minibatches: 8
+  learning_rate: 0.0003
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  clip_range_vf: null
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: 0.02
+  template_embed_dim: 64
+  r2_embed_dim: 64
+  r2_resample_retries: 16
+  normalize_advantage: true
+  weight_decay: 0.0
+  adam_eps: 0.00001
+  device: null

@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-# Bi GraphTransPPO via the hand-rolled `GraphTransBiPPO` trainer
-# (--algorithm graphtransppo_bi). Hierarchical autoregressive policy
-# π(T | R1) · π(R2 | R1, T) where R1 is encoded by a GraphTransformer
-# over the molecular graph instead of a Morgan fingerprint. All
-# hyperparameters come from the YAML config below.
-# Pair: run_genmolrl_graphtransppo_bi_multidiscrete.sh (same encoder,
+# Bi GraphTransPPO hierarchical policy with r2_arch: lookup (default YAML).
+# For encoder_graph_shared (weight-tied R2 GraphTransformer), use
+# run_genmolrl_graphtransppo_bi_hierarchical_encoder_graph_shared.sh instead.
+# Pair: run_genmolrl_graphtransppo_bi_multidiscrete.sh (same lookup R2 head,
 # independent T / R2 axis heads).
 source "$(cd "$(dirname "$0")" && pwd)/_launcher_common.sh"
 
