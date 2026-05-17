@@ -80,6 +80,17 @@ class KNNWrapper(gym.ActionWrapper):
             return
 
         fps = torch.stack([torch.as_tensor(self.reactants[reactant], dtype=torch.float32) for reactant in valid_reactants])
+        # PGFS bug fix: rescale the binary Morgan-FP keys from {0, 1} to
+        # {-1, +1} so the FAISS index and the actor's tanh-output queries
+        # share a symmetric range. With the old layout (keys ∈ {0, 1}, query
+        # ∈ [-1, +1] after dropping the binariser) the effective per-bit
+        # threshold sat at 0.5, so the actor had to push individual dims
+        # well above 0 just to flip a bit ON, biasing retrieval toward bits
+        # OFF. Under the rescaled keys the per-bit threshold is 0 and the
+        # mapping is symmetric. ``2 * fp - 1`` is the same transform we apply
+        # in ``train._to_r2_tensor`` so warm-up keys, post-warm-up actor
+        # outputs and FAISS keys all live in [-1, +1].
+        fps = 2.0 * fps - 1.0
         if self.use_gpu:
             fps = fps.cuda()
             index = faiss.GpuIndexFlatL2(self.res, fps.shape[1])
@@ -97,7 +108,21 @@ class KNNWrapper(gym.ActionWrapper):
         if template_index >= len(self.env.unwrapped.templates):
             return template_index, None
 
-        reactant_vector = (reactant_vector >= 0).float()
+        # PGFS bug fix: previously the continuous tanh output was binarised
+        # via ``(vec >= 0).float()`` before the FAISS query. That collapsed the
+        # actor's continuous head into {0, 1}^d, decoupling the critic's
+        # gradient from the discrete R(2) actually selected by KNN: two
+        # policies differing by ε across a sign-flip threshold mapped to
+        # different R(2)s with very different rewards, so DPG could not steer
+        # the head reliably. The original PGFS paper performs L2 retrieval in
+        # the continuous descriptor space; we mirror that here by passing the
+        # raw continuous vector to FAISS. The index is still over Morgan FPs
+        # in {0, 1}^d but L2(continuous_query, binary_key) is smooth in the
+        # query and matches the threshold-then-NN semantics in the
+        # tanh-saturated limit while remaining differentiable-friendly in the
+        # transition region. Tensors are detached before the numpy hop below
+        # in ``_process_knn_search``.
+        reactant_vector = reactant_vector.detach().to(torch.float32)
         self._initialize_index_for_template(template_index)
         return self._process_knn_search(
             self.knn_indices.get(template_index), reactant_vector, template_index

@@ -87,7 +87,19 @@ def _to_r2_tensor(env, r2):
         return r2
     if r2 is None:
         return torch.zeros((1, _td3_fp_dim(env)), device=device)
-    return torch.tensor(env.unwrapped.reactants[r2], dtype=torch.float32, device=device).unsqueeze(0)
+    # PGFS bug fix: warm-up returns a SMILES string for the randomly chosen
+    # R(2); we used to store its raw Morgan FP (binary {0, 1}^d) in the replay
+    # buffer. After warm-up the actor stores its continuous tanh output
+    # (∈ [-1, +1]^d) for the same slot. The critic was therefore asked to fit
+    # ``Q(s, T, r2_vec)`` over two completely different distributions
+    # (sparse-binary vs dense-continuous), and the actor's DPG gradient never
+    # saw a meaningful Q surface — the run collapses to ``reward_per_step≈-1``
+    # within ~10k actor updates (W&B ``ojmdb4uf``). Map the binary FP into the
+    # tanh range so both regimes write into the same continuous space. This is
+    # a Bi-TD3-only path (uni-discrete returns above; ``isinstance(Tensor)``
+    # short-circuits the actor's own output).
+    fp = torch.tensor(env.unwrapped.reactants[r2], dtype=torch.float32, device=device)
+    return (2.0 * fp - 1.0).unsqueeze(0)
 
 
 def _has_real_action(env, smiles: str | None, *, template_mask_kind: str | None = None) -> bool:

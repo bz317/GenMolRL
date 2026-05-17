@@ -1,0 +1,109 @@
+# =============================================================================
+# TD3 | BI templates | CONTINUOUS PGFS-style action space (FIXED)
+# -----------------------------------------------------------------------------
+# Sibling of ``td3_bi_continuous_masked_delta_qed.yaml`` (the "strict PGFS"
+# config that collapses to ``reward_per_step ≈ -1`` in W&B runs ``ojmdb4uf`` /
+# ``r6palfgf``). This file pairs with the three Bi-TD3-only code fixes:
+#
+#   (A) ``td3/knn.py``: drop the ``(vec >= 0).float()`` binariser and run FAISS
+#       L2 over the raw continuous tanh output. Also rescale the FAISS index
+#       keys from {0, 1} → {-1, +1} so query and keys share a symmetric range.
+#   (B) ``td3/train.py::_to_r2_tensor``: rescale the warm-up R(2) Morgan FP
+#       from {0, 1} → {-1, +1} so warm-up writes the same continuous space the
+#       actor's tanh head emits post-warm-up. Removes the critic
+#       distribution-shift that made DPG gradients meaningless.
+#   (C) ``td3/models.py::PiNetwork``: drop the trailing 167-dim bottleneck
+#       (``[256, 256, 167]`` → ``[256, 256, 256]``). 167 was a leftover from
+#       descriptor-PGFS where the action space was 167-dim, not 1024-dim
+#       Morgan FPs.
+#
+# Config-side changes from the strict YAML below the section break document
+# the rationale for each knob change. Everything else (algorithm family,
+# action design, gamma, tau, policy_freq, twin critics, target smoothing,
+# symmetric target actor, forward-react KNN scoring) stays PGFS-faithful.
+# =============================================================================
+project: GenMolRL_Bi
+experiment_name: TD3_Bi_Continuous_PGFS_Fixed
+reaction_mode: bi
+# Strict PGFS uses no template mask — the actor freely samples any template
+# and infeasible (state, T) picks are punished via ``invalid_reaction_penalty``
+# (-1). We keep that here; switch to ``r2_available`` if you want pool-side
+# pruning (deviates from PGFS).
+masking: none
+reward: delta_qed
+max_episode_len: 5
+dataset:
+  training_file: data/Bi/reactants_train.pkl
+  test_file: data/Bi/reactants_test.pkl
+  templates_file: data/Bi/templates.pkl
+  start_strategy: random_pool
+  # R(2) pool the env iterates at eval time. ``train`` matches the
+  # comparison axis used by `vbhzhufk` / `gr7aa7z6` (PPO-Bi lookup baseline).
+  eval_r2_pool: train
+env:
+  algorithm_family: td3_pgfs
+  action_design: pgfs_continuous_r2
+  # PGFS Figure 2 / Algorithm 1: no Stop action. Episodes always run
+  # max_episode_len steps. Enabling Stop together with ``delta_qed`` revives
+  # the always-Stop trap (Q(Stop)≈0 beats Q(reaction)<0 globally) — confirmed
+  # in W&B run ``r6palfgf``.
+  use_stop_action: false
+  stop_early_penalty: 0.0
+  stop_penalty_until_step: -1
+  invalid_reaction_penalty: -1.0
+  # PGFS Figure 2 feeds f_net the raw Morgan FP of R(1); we keep that.
+  append_action_mask_to_obs: false
+training:
+  seed: 42
+  total_timesteps: 1000000
+  start_timesteps: 10000
+  eval_freq: 10000
+  n_envs: 1
+td3:
+  actor_lr: 0.0001
+  critic_lr: 0.0003
+  gamma: 0.99
+  tau: 0.005
+  batch_size: 64
+  buffer_size: 1000000
+  policy_freq: 2
+  policy_noise: 0.2
+  # Bumped from 0.1 → 0.2. With a 1024-dim tanh output the per-dim
+  # exploration mass from 0.1 is tiny once the head saturates near ±1; 0.2
+  # keeps a meaningful per-bit flip probability in the FAISS query.
+  noise_std: 0.2
+  noise_clip: 0.2
+  initial_temperature: 1.0
+  # Lowered 0.25 → 0.1 so Gumbel-Softmax converges to near-discrete actions
+  # by end of training (PGFS target). Matches the schedule in the paper
+  # better and reduces TD variance from the symmetric stochastic target
+  # actor.
+  min_temperature: 0.1
+  # PGFS Algorithm 1 line 21: auxiliary cross-entropy supervision on f_net.
+  # Dropped 1.0 → 0.1. At coefficient 1.0 the CE term is ~5× the DPG loss
+  # at warm-up (log(88)≈4.5 vs |Q|≈1), so f_net is anchored to the random
+  # warm-up template distribution before the critic produces any gradient
+  # signal. 0.1 keeps the bootstrap nudge without overriding DPG.
+  f_ce_loss_coef: 0.1
+  symmetric_target_actor: true
+  # KNN over R(2) candidates. Stays in ``product`` mode (PGFS-faithful) but
+  # widened k from 5 → 25. With strict PGFS top_k=5 in 1024-dim Morgan FP
+  # space, ~all 5 candidates often fail (every step then returns the same
+  # SMILES the env will fail again on); k=25 gives the actor at least a few
+  # successful forward reactions per step to learn from.
+  knn_score_mode: product
+  knn_random_epsilon: 0.0
+  knn_top_k: 25
+  # No ε-greedy on top of Gumbel — PGFS-faithful.
+  training_random_action_prob: 0.0
+  training_random_action_min_prob: 0.0
+  training_random_action_decay_steps: 0
+  # Warm-up never picks Stop (Stop is disabled anyway).
+  warmup_stop_probability: 0.0
+  # Deterministic TD3 + CE on f_net (no SAC-discrete soft path).
+  entropy_regularization: false
+  auto_tune_alpha: false
+  save_replay_buffer_in_checkpoints: false
+callbacks:
+  model_save_freq: 100000
+  gradient_save_freq: 100

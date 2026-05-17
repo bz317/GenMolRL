@@ -53,7 +53,7 @@ reaction_mode: bi
 #     rewards by construction; ~116k RDKit calls per (state, T) so slow.
 #   - substructure: template SMARTS match against R(1) only, ignoring R(2)
 #     availability. Cheapest pattern-only mask.
-masking: none
+masking: r2_available
 reward: delta_qed
 max_episode_len: 5
 dataset:
@@ -87,7 +87,7 @@ env:
   action_design: pgfs_continuous_r2
   # PGFS Figure 2 / Algorithm 1 has no Stop action. Episodes always run
   # max_episode_len steps. Disable Stop and any stop penalty.
-  use_stop_action: false
+  use_stop_action: true
   stop_early_penalty: 0.0
   stop_penalty_until_step: -1
   invalid_reaction_penalty: -1.0

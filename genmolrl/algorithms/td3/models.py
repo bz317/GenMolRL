@@ -51,9 +51,21 @@ class FNetwork(nn.Module):
 
 
 class PiNetwork(nn.Module):
+    """Continuous R(2) head used only by Bi-TD3 (uni-discrete uses ``ActorNetworkUniDiscrete``).
+
+    The previous default ``[256, 256, 167]`` was a leftover from descriptor-PGFS
+    (where the action space was the 167-dim chemical descriptor used in the
+    paper). With this codebase's Morgan-FP action space (``output_dim`` ≈ 1024)
+    the trailing ``→ 167 → 1024`` step was a hard information bottleneck: only
+    167 features carried bit decisions for 1024 output dims. Replaced with
+    ``[256, 256, 256]`` so the final width matches the rest of the trunk.
+    Uni-TD3 builds ``ActorNetworkUniDiscrete`` and never instantiates this
+    network, so Uni runs are bit-equivalent.
+    """
+
     def __init__(self, input_dim: int, output_dim: int, hidden_dims: list[int] | None = None):
         super().__init__()
-        hidden_dims = hidden_dims or [256, 256, 167]
+        hidden_dims = hidden_dims or [256, 256, 256]
         layers: list[nn.Module] = []
         prev_dim = input_dim
         for hidden_dim in hidden_dims:

@@ -1,0 +1,81 @@
+#!/bin/bash
+#!
+#! SLURM job script for Bi-TD3 PGFS-Fixed
+#! (run_genmolrl_td3_bi_continuous_pgfs_fixed.sh ->
+#!  configs/td3_bi_continuous_pgfs_fixed_delta_qed.yaml). See the new YAML's
+#! header for the three Bi-TD3-only code fixes (knn.py, train.py, models.py)
+#! and the config-side changes vs. the strict-PGFS baseline.
+#!
+
+#!#############################################################
+#!#### Modify the options in this section as appropriate ######
+#!#############################################################
+
+#! sbatch directives begin here ###############################
+#! Name of the job:
+#SBATCH -J genmolrl_td3_bi_fix
+#! Which project should be charged (NB Wilkes2 projects end in '-GPU'):
+#SBATCH -A OZTIRELI-SL2-GPU
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:1
+#SBATCH --time=24:00:00
+#SBATCH --mail-user=bz317@cam.ac.uk
+#SBATCH --mail-type=ALL
+
+#SBATCH -p ampere
+
+##SBATCH -o logs/td3_bi_continuous_pgfs_fixed_%j.out
+##SBATCH -e logs/td3_bi_continuous_pgfs_fixed_%j.err
+
+#! sbatch directives end here #################################
+
+#! Optional overrides: CONDA_ENV, CONFIG, WANDB_RUN_POST_APPEND
+#! Submit: cd /home/bz317/rds/hpc-work/GenMolRL/GenMolRL && sbatch run_launcher/HPC_scripts/bi/slurm_genmolrl_gpu_td3_bi_continuous_pgfs_fixed
+
+numnodes=$SLURM_JOB_NUM_NODES
+numtasks=$SLURM_NTASKS
+mpi_tasks_per_node=$(echo "$SLURM_TASKS_PER_NODE" | sed -e  's/^\([0-9][0-9]*\).*$/\1/')
+
+. /etc/profile.d/modules.sh
+module purge
+module load rhel8/default-amp
+
+CONDA_ROOT="${CONDA_ROOT:-/home/bz317/rds/hpc-work/miniconda3}"
+source "${CONDA_ROOT}/etc/profile.d/conda.sh"
+CONDA_ENV="${CONDA_ENV:-RL_for_new_mol}"
+conda activate "${CONDA_ENV}"
+
+LAUNCHER_REL="run_launcher/HPC_sh_files/run_genmolrl_td3_bi_continuous_pgfs_fixed.sh"
+for _cand in "${SLURM_SUBMIT_DIR}" "${SLURM_SUBMIT_DIR}/.." "${SLURM_SUBMIT_DIR}/../.." "${SLURM_SUBMIT_DIR}/../../.." "/home/bz317/rds/hpc-work/GenMolRL/GenMolRL"; do
+  if [ -f "${_cand}/${LAUNCHER_REL}" ]; then
+    PROJECT_ROOT="$(cd "${_cand}" && pwd)"
+    break
+  fi
+done
+unset _cand
+LAUNCHER_PATH="${PROJECT_ROOT}/${LAUNCHER_REL}"
+
+export OMP_NUM_THREADS=1
+export PYTHONUNBUFFERED=1
+
+cd "${PROJECT_ROOT}"
+mkdir -p logs
+JOBID=$SLURM_JOB_ID
+
+export WANDB_RUN_POST_APPEND="${WANDB_RUN_POST_APPEND:-HPC}"
+
+CMD="bash \"${LAUNCHER_PATH}\""
+CMD="$CMD 2>&1 | tee logs/td3_bi_continuous_pgfs_fixed_${JOBID}.log"
+
+echo -e "JobID: $JOBID\n======"
+echo "Time: $(date)"
+echo "Running on: $(hostname)"
+echo "PROJECT_ROOT: ${PROJECT_ROOT}"
+echo "CONDA_ROOT: ${CONDA_ROOT}"
+echo "CONDA_ENV: ${CONDA_ENV}"
+echo "WANDB_RUN_POST_APPEND: ${WANDB_RUN_POST_APPEND}"
+echo -e "\nnumtasks=$numtasks, numnodes=$numnodes (OMP_NUM_THREADS=$OMP_NUM_THREADS)"
+echo -e "\nExecuting:\n==================\n$CMD\n"
+
+eval $CMD
